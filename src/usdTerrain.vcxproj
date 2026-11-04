@@ -46,6 +46,8 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)_bin\$(Platform)_$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)_tmp\$(Platform)_$(Configuration)\</IntDir>
+    <UsdSdkRoot>$(ProjectDir)..\externals\usd</UsdSdkRoot>
+    <PythonIncludeDir Condition="'$(PythonIncludeDir)' == ''">$(LOCALAPPDATA)\Programs\Python\Python314\include</PythonIncludeDir>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg">
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
@@ -54,19 +56,21 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;USDTERRAIN_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>USDTERRAIN_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalOptions>/utf-8 /Zc:inline- %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\externals;$(UsdSdkRoot)\include;$(PythonIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>usd_ar.lib;usd_arch.lib;usd_tf.lib;usd_vt.lib;usd_gf.lib;usd_sdf.lib;usd_pcp.lib;usd_hio.lib;usd_usd.lib;usd_usdGeom.lib;usd_usdShade.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ProjectDir)vcpkg_installed\x64-windows\x64-windows\bin;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>usd_ms.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(UsdSdkRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -78,21 +82,22 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;USDTERRAIN_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;TBB_USE_DEBUG=0;USDTERRAIN_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(UsdSdkRoot)\include;$(PythonIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalOptions>/utf-8 /Zc:inline- %(AdditionalOptions)</AdditionalOptions>
       <RemoveUnreferencedCodeData>false</RemoveUnreferencedCodeData>
-      <AdditionalIncludeDirectories>$(SolutionDir)externals;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\externals;$(UsdSdkRoot)\include;$(PythonIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>usd_ar.lib;usd_arch.lib;usd_tf.lib;usd_vt.lib;usd_gf.lib;usd_sdf.lib;usd_pcp.lib;usd_hio.lib;usd_usd.lib;usd_usdGeom.lib;usd_usdShade.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ProjectDir)vcpkg_installed\x64-windows\x64-windows\bin;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>usd_ms.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(UsdSdkRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -133,7 +138,24 @@
     <None Include="plugInfo.json" />
     <None Include="vcpkg.json" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="setup.vcxproj">
+      <Project>{9B9E8926-2BA4-46F2-94F3-EBB3C2867A24}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyUsdRuntime" AfterTargets="Build" Condition="Exists('$(UsdSdkRoot)\lib\usd_ms.dll')">
+    <ItemGroup>
+      <UsdRuntimeDll Include="$(UsdSdkRoot)\lib\usd_ms.dll" />
+      <UsdRuntimeDll Include="$(UsdSdkRoot)\bin\*.dll" />
+      <UsdRuntimeDll Include="$(UsdSdkRoot)\python\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UsdRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="ValidateUsdPythonHeaders" BeforeTargets="ClCompile">
+    <Error Condition="!Exists('$(PythonIncludeDir)\pyconfig.h')" Text="USD 26.11.1 requires Python 3.14 development headers. Set PythonIncludeDir to the Python 3.14 include directory." />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

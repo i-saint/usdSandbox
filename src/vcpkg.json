@@ -1,10 +1,6 @@
-{
+﻿{
     "builtin-baseline": "2a1337cc3e8326c8776597cd61932bf59910fa85",
     "dependencies": [
-      {
-        "name": "usd",
-        "features": [ "imaging" ]
-      },
       {
         "name": "vulkan"
       }

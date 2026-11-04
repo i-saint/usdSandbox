@@ -2,3 +2,5 @@
 _bin
 _tmp
 vcpkg_installed
+externals
+*.user
