@@ -3,5 +3,6 @@
     <Platform Name="x64" />
   </Configurations>
   <Project Path="src/test.vcxproj" Id="0089ae0e-e430-4217-90be-61e3a55cd34d" />
+  <Project Path="src/usdObjPlus/usdObjPlus.vcxproj" Id="640b7b1f-d0c5-4a0b-a212-1c294e5dd891" />
   <Project Path="src\usdTerrain.vcxproj" Id="0089ae0e-e430-4217-90be-61e3a55cd34c" />
 </Solution>

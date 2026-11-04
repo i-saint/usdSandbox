@@ -1,0 +1,29 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "UsdObjPlusFileFormat": {
+                        "bases": [
+                            "SdfFileFormat"
+                        ],
+                        "displayName": "OBJ Import and Export",
+                        "extensions": [
+                            "obj"
+                        ],
+                        "formatId": "usdObjPlus",
+                        "primary": true,
+                        "supportsEditing": false,
+                        "supportsWriting": true,
+                        "target": "usd"
+                    }
+                }
+            },
+            "LibraryPath": "usdObjPlus.dll",
+            "Name": "usdObjPlus",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "library"
+        }
+    ]
+}
