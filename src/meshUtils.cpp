@@ -7,6 +7,182 @@
 using float2 = GfVec2f;
 using float3 = GfVec3f;
 
+template<class T>
+class MeshRefiner::IndexedAttribute final : public MeshRefiner::IAttribute
+{
+public:
+    void Prepare(int /*vertexCount*/, int /*indexCount*/) override
+    {
+        Clear();
+    }
+
+    bool Compare(int vertexIndex, int indexIndex) const override
+    {
+        return (*newValues)[vertexIndex] == (*values)[(*indices)[indexIndex]];
+    }
+
+    void Emit(int indexIndex) override
+    {
+        const int srcIndex = (*indices)[indexIndex];
+        newValues->push_back((*values)[srcIndex]);
+        new2old->push_back(srcIndex);
+    }
+
+    void Clear() override
+    {
+        newValues->clear();
+        new2old->clear();
+    }
+
+    const VtArray<T>* values = nullptr;
+    const VtArray<int>* indices = nullptr;
+    VtArray<T>* newValues = nullptr;
+    VtArray<int>* new2old = nullptr;
+};
+
+template<class T>
+class MeshRefiner::ExpandedAttribute final : public MeshRefiner::IAttribute
+{
+public:
+    void Prepare(int /*vertexCount*/, int /*indexCount*/) override
+    {
+        Clear();
+    }
+
+    bool Compare(int vertexIndex, int indexIndex) const override
+    {
+        return (*newValues)[vertexIndex] == (*values)[indexIndex];
+    }
+
+    void Emit(int indexIndex) override
+    {
+        newValues->push_back((*values)[indexIndex]);
+        new2old->push_back(indexIndex);
+    }
+
+    void Clear() override
+    {
+        newValues->clear();
+        new2old->clear();
+    }
+
+    const VtArray<T>* values = nullptr;
+    VtArray<T>* newValues = nullptr;
+    VtArray<int>* new2old = nullptr;
+};
+
+template<class T>
+void MeshRefiner::AddIndexedAttribute(const VtArray<T>& values, const VtArray<int>& attrIndices, VtArray<T>& newValues, VtArray<int>& new2old)
+{
+    auto attr = std::make_unique<IndexedAttribute<T>>();
+    attr->values = &values;
+    attr->indices = &attrIndices;
+    attr->newValues = &newValues;
+    attr->new2old = &new2old;
+    attributes.push_back(std::move(attr));
+}
+
+template<class T>
+void MeshRefiner::AddExpandedAttribute(const VtArray<T>& values, VtArray<T>& newValues, VtArray<int>& new2old)
+{
+    auto attr = std::make_unique<ExpandedAttribute<T>>();
+    attr->values = &values;
+    attr->newValues = &newValues;
+    attr->new2old = &new2old;
+    attributes.push_back(std::move(attr));
+}
+
+template void MeshRefiner::AddIndexedAttribute<GfVec3f>(const VtArray<GfVec3f>& values, const VtArray<int>& attrIndices, VtArray<GfVec3f>& newValues, VtArray<int>& new2old);
+template void MeshRefiner::AddIndexedAttribute<GfVec4f>(const VtArray<GfVec4f>& values, const VtArray<int>& attrIndices, VtArray<GfVec4f>& newValues, VtArray<int>& new2old);
+template void MeshRefiner::AddIndexedAttribute<GfVec2f>(const VtArray<GfVec2f>& values, const VtArray<int>& attrIndices, VtArray<GfVec2f>& newValues, VtArray<int>& new2old);
+
+template void MeshRefiner::AddExpandedAttribute<GfVec3f>(const VtArray<GfVec3f>& values, VtArray<GfVec3f>& newValues, VtArray<int>& new2old);
+template void MeshRefiner::AddExpandedAttribute<GfVec4f>(const VtArray<GfVec4f>& values, VtArray<GfVec4f>& newValues, VtArray<int>& new2old);
+template void MeshRefiner::AddExpandedAttribute<GfVec2f>(const VtArray<GfVec2f>& values, VtArray<GfVec2f>& newValues, VtArray<int>& new2old);
+
+void MeshRefiner::Clear()
+{
+    counts.clear();
+    indices.clear();
+    points.clear();
+
+    old2newIndices.clear();
+    new2oldPoints.clear();
+    newCounts.clear();
+    newIndices.clear();
+    newPoints.clear();
+
+    for (auto& attribute : attributes) {
+        attribute->Clear();
+    }
+    attributes.clear();
+}
+
+void MeshRefiner::Refine()
+{
+    newCounts.clear();
+    newIndices.clear();
+    newPoints.clear();
+    new2oldPoints.clear();
+
+    for (auto& attribute : attributes) {
+        attribute->Prepare(static_cast<int>(points.size()), static_cast<int>(indices.size()));
+    }
+
+    VtArray<int> sourceIndices = indices;
+    if (sourceIndices.empty()) {
+        sourceIndices.resize(points.size());
+        std::iota(sourceIndices.begin(), sourceIndices.end(), 0);
+    }
+
+    old2newIndices.resize(sourceIndices.size());
+    std::fill(old2newIndices.begin(), old2newIndices.end(), -1);
+
+    std::vector<std::vector<int>> vertexToNew;
+    vertexToNew.resize(points.size());
+
+    newCounts = counts;
+    newIndices.reserve(sourceIndices.size());
+    newPoints.reserve(sourceIndices.size());
+    new2oldPoints.reserve(sourceIndices.size());
+
+    for (size_t ii = 0; ii < sourceIndices.size(); ++ii) {
+        const int vi = sourceIndices[ii];
+        if (vi < 0 || vi >= static_cast<int>(points.size())) {
+            continue;
+        }
+
+        int newIndex = -1;
+        auto& candidates = vertexToNew[vi];
+        for (int ni : candidates) {
+            bool match = true;
+            for (const auto& attribute : attributes) {
+                if (!attribute->Compare(ni, static_cast<int>(ii))) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                newIndex = ni;
+                break;
+            }
+        }
+
+        if (newIndex == -1) {
+            newIndex = static_cast<int>(newPoints.size());
+            newPoints.push_back(points[vi]);
+            new2oldPoints.push_back(vi);
+            candidates.push_back(newIndex);
+            for (auto& attribute : attributes) {
+                attribute->Emit(static_cast<int>(ii));
+            }
+        }
+
+        old2newIndices[ii] = newIndex;
+        newIndices.push_back(newIndex);
+    }
+}
+
 #pragma region Triangulation
 static float Cross2D(const float2& a, const float2& b, const float2& c)
 {
@@ -270,6 +446,82 @@ bool Triangulator::SimpleTriangulate(std::span<const int> indices)
     return true;
 }
 
+
+bool RefineMesh(const MeshData& src, MeshData& dst)
+{
+    VtArray<int> sourceIndices = src.indices;
+    if (sourceIndices.empty()) {
+        sourceIndices.resize(src.points.size());
+        std::iota(sourceIndices.begin(), sourceIndices.end(), 0);
+    }
+
+    size_t totalCount = 0;
+    for (int count : src.counts) {
+        if (count <= 0) {
+            return false;
+        }
+        totalCount += static_cast<size_t>(count);
+    }
+    if (totalCount > sourceIndices.size()) {
+        return false;
+    }
+
+    MeshRefiner refiner;
+    refiner.counts = src.counts;
+    refiner.indices = sourceIndices;
+    refiner.points = src.points;
+
+    VtArray<int> primvarNew2OldNormals;
+    VtArray<int> primvarNew2OldBinormals;
+    VtArray<int> primvarNew2OldTangents;
+    VtArray<int> primvarNew2OldColors;
+    VtArray<int> primvarNew2OldUvs[kMaxUvSets];
+
+    auto bindPrimvar = [&]<typename T>(const PrimvarData<T>& srcPrimvar, PrimvarData<T>& dstPrimvar, VtArray<int>& new2old) {
+        dstPrimvar.indices.clear();
+        dstPrimvar.values.clear();
+        new2old.clear();
+
+        if (srcPrimvar.values.empty()) {
+            return true;
+        }
+
+        if (!srcPrimvar.indices.empty()) {
+            if (srcPrimvar.indices.size() < totalCount) {
+                return false;
+            }
+            refiner.AddIndexedAttribute(srcPrimvar.values, srcPrimvar.indices, dstPrimvar.values, new2old);
+            return true;
+        }
+
+        if (srcPrimvar.values.size() == totalCount) {
+            refiner.AddExpandedAttribute(srcPrimvar.values, dstPrimvar.values, new2old);
+            return true;
+        }
+
+        if (srcPrimvar.values.size() == src.points.size()) {
+            refiner.AddIndexedAttribute(srcPrimvar.values, sourceIndices, dstPrimvar.values, new2old);
+            return true;
+        }
+
+        return false;
+    };
+
+    if (!bindPrimvar(src.normals, dst.normals, primvarNew2OldNormals)) return false;
+    if (!bindPrimvar(src.binormals, dst.binormals, primvarNew2OldBinormals)) return false;
+    if (!bindPrimvar(src.tangents, dst.tangents, primvarNew2OldTangents)) return false;
+    if (!bindPrimvar(src.colors, dst.colors, primvarNew2OldColors)) return false;
+    for (int i = 0; i < kMaxUvSets; ++i) {
+        if (!bindPrimvar(src.uvs[i], dst.uvs[i], primvarNew2OldUvs[i])) return false;
+    }
+
+    refiner.Refine();
+
+    dst.counts = refiner.newCounts;
+    dst.indices = refiner.newIndices;
+    dst.points = refiner.newPoints;
+    return true;
+}
 
 bool TriangulateMesh(const MeshData& src, MeshData& dst)
 {
