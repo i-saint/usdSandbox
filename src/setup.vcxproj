@@ -33,13 +33,9 @@
     <UsdArchivePath>$(ProjectDir)..\_tmp\usd-26.11.1.7z</UsdArchivePath>
     <UsdInstallPath>$(ProjectDir)..\externals\usd</UsdInstallPath>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(SolutionDir)_bin\$(Platform)_$(Configuration)\setup</OutDir>
-    <IntDir>$(SolutionDir)_tmp\$(Platform)_$(Configuration)\setup</IntDir>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)_bin\$(Platform)_$(Configuration)\setup</OutDir>
-    <IntDir>$(SolutionDir)_tmp\$(Platform)_$(Configuration)\setup</IntDir>
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)_bin\$(Platform)_$(Configuration)_$(ProjectName)\</OutDir>
+    <IntDir>$(SolutionDir)_tmp\$(Platform)_$(Configuration)_$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemGroup>
     <None Include="setup.ps1" />
