@@ -20,6 +20,10 @@ struct MeshData
     PrimvarData<GfVec3f> normals, binormals, tangents;
     PrimvarData<GfVec4f> colors;
     PrimvarData<GfVec2f> uvs[kMaxUvSets];
+
+    VtArray<int> jointIndices;
+    VtArray<float> jointWeights;
+    int jointsPerVertex = 0;
 };
 
 #define EachMeshPrimvar(Action) \
@@ -101,3 +105,7 @@ bool RefineMesh(const MeshData& src, MeshData& dst);
 
 // 三角形化。line / point は無視される
 bool TriangulateMesh(const MeshData& src, MeshData& dst);
+
+// 頂点あたりの joint 数を変更する。
+// 減らす場合は影響度の小さいものを切り捨てて正規化し、増やす場合は 0 で埋める。
+bool SetJointsPerVertex(MeshData& dst, int n);

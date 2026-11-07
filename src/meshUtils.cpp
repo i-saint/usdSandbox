@@ -466,6 +466,20 @@ bool RefineMesh(const MeshData& src, MeshData& dst)
         return false;
     }
 
+    const int jointsPerVertex = src.jointsPerVertex;
+    if (jointsPerVertex < 0) {
+        return false;
+    }
+    if (jointsPerVertex > 0) {
+        const size_t jointElementCount = static_cast<size_t>(src.points.size()) * static_cast<size_t>(jointsPerVertex);
+        if (src.jointIndices.size() != jointElementCount || src.jointWeights.size() != jointElementCount) {
+            return false;
+        }
+    }
+    else if (!src.jointIndices.empty() || !src.jointWeights.empty()) {
+        return false;
+    }
+
     MeshRefiner refiner;
     refiner.counts = src.counts;
     refiner.indices = sourceIndices;
@@ -520,6 +534,29 @@ bool RefineMesh(const MeshData& src, MeshData& dst)
     dst.counts = refiner.newCounts;
     dst.indices = refiner.newIndices;
     dst.points = refiner.newPoints;
+
+    dst.jointsPerVertex = jointsPerVertex;
+    if (jointsPerVertex > 0) {
+        const size_t jointElementCount = static_cast<size_t>(refiner.newPoints.size()) * static_cast<size_t>(jointsPerVertex);
+        dst.jointIndices.resize(jointElementCount);
+        dst.jointWeights.resize(jointElementCount);
+
+        for (size_t newPointIndex = 0; newPointIndex < refiner.new2oldPoints.size(); ++newPointIndex) {
+            const int oldPointIndex = refiner.new2oldPoints[newPointIndex];
+            const size_t srcOffset = static_cast<size_t>(oldPointIndex) * static_cast<size_t>(jointsPerVertex);
+            const size_t dstOffset = newPointIndex * static_cast<size_t>(jointsPerVertex);
+            for (int j = 0; j < jointsPerVertex; ++j) {
+                const size_t jj = static_cast<size_t>(j);
+                dst.jointIndices[dstOffset + jj] = src.jointIndices[srcOffset + jj];
+                dst.jointWeights[dstOffset + jj] = src.jointWeights[srcOffset + jj];
+            }
+        }
+    }
+    else {
+        dst.jointIndices.clear();
+        dst.jointWeights.clear();
+    }
+
     return true;
 }
 
@@ -558,6 +595,27 @@ bool TriangulateMesh(const MeshData& src, MeshData& dst)
     dst.counts.clear();
     dst.counts.resize(totalTriangles, 3);
     dst.points = basePoints;
+
+    if (src.jointsPerVertex < 0) {
+        return false;
+    }
+    if (src.jointsPerVertex > 0) {
+        const size_t jointElementCount = static_cast<size_t>(basePoints.size()) * static_cast<size_t>(src.jointsPerVertex);
+        if (src.jointIndices.size() != jointElementCount || src.jointWeights.size() != jointElementCount) {
+            return false;
+        }
+        dst.jointsPerVertex = src.jointsPerVertex;
+        dst.jointIndices = src.jointIndices;
+        dst.jointWeights = src.jointWeights;
+    }
+    else {
+        if (!src.jointIndices.empty() || !src.jointWeights.empty()) {
+            return false;
+        }
+        dst.jointsPerVertex = 0;
+        dst.jointIndices.clear();
+        dst.jointWeights.clear();
+    }
 
     auto initializePrimvar = [&]<typename T>(const PrimvarData<T>&srcPV, PrimvarData<T>&dstPV) {
         dstPV.indices.clear();
@@ -633,3 +691,74 @@ bool TriangulateMesh(const MeshData& src, MeshData& dst)
     return true;
 }
 #pragma endregion Triangulation
+
+bool SetJointsPerVertex(MeshData& dst, int n)
+{
+    const int oldN = dst.jointsPerVertex;
+    if (n < 0 || oldN < 0) {
+        return false;
+    }
+
+    const size_t vertexCount = dst.points.size();
+    const size_t oldElementCount = vertexCount * static_cast<size_t>(oldN);
+    if (dst.jointIndices.size() != oldElementCount || dst.jointWeights.size() != oldElementCount) {
+        return false;
+    }
+    if (n == oldN) {
+        return true;
+    }
+
+    if (n == 0) {
+        dst.jointIndices.clear();
+        dst.jointWeights.clear();
+        dst.jointsPerVertex = 0;
+        return true;
+    }
+
+    const size_t newElementCount = vertexCount * static_cast<size_t>(n);
+    VtArray<int> newIndices(newElementCount, 0);
+    VtArray<float> newWeights(newElementCount, 0.0f);
+
+    if (n > oldN) {
+        for (size_t vi = 0; vi < vertexCount; ++vi) {
+            const size_t srcOffset = vi * static_cast<size_t>(oldN);
+            const size_t dstOffset = vi * static_cast<size_t>(n);
+            for (int j = 0; j < oldN; ++j) {
+                newIndices[dstOffset + j] = dst.jointIndices[srcOffset + j];
+                newWeights[dstOffset + j] = dst.jointWeights[srcOffset + j];
+            }
+        }
+    }
+    else {
+        std::vector<int> order(static_cast<size_t>(oldN));
+        for (size_t vi = 0; vi < vertexCount; ++vi) {
+            const size_t srcOffset = vi * static_cast<size_t>(oldN);
+            const size_t dstOffset = vi * static_cast<size_t>(n);
+
+            std::iota(order.begin(), order.end(), 0);
+            std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+                return dst.jointWeights[srcOffset + a] > dst.jointWeights[srcOffset + b];
+            });
+
+            float total = 0.0f;
+            for (int j = 0; j < n; ++j) {
+                const size_t si = srcOffset + order[j];
+                newIndices[dstOffset + j] = dst.jointIndices[si];
+                newWeights[dstOffset + j] = dst.jointWeights[si];
+                total += dst.jointWeights[si];
+            }
+
+            if (total > 0.0f) {
+                const float rcp = 1.0f / total;
+                for (int j = 0; j < n; ++j) {
+                    newWeights[dstOffset + j] *= rcp;
+                }
+            }
+        }
+    }
+
+    dst.jointIndices = std::move(newIndices);
+    dst.jointWeights = std::move(newWeights);
+    dst.jointsPerVertex = n;
+    return true;
+}
