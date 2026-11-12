@@ -1172,6 +1172,9 @@ public:
 private:
     void ConfigureRoutes(httplib::Server& svr)
     {
+        svr.set_default_headers({
+            { "Access-Control-Allow-Origin", "*" },
+        });
         svr.set_default_file_mimetype("application/octet-stream");
         svr.set_file_extension_and_mimetype_mapping("usda", "text/plain; charset=utf-8");
         svr.set_file_extension_and_mimetype_mapping("usdz", "model/vnd.usdz+zip");
