@@ -32,18 +32,16 @@
 #include <unordered_set>
 #include <utility>
 
-namespace {
+static std::mutex g_consoleLogMutex;
 
-std::mutex g_consoleLogMutex;
-
-void WriteConsoleLine(bool toStderr, std::string_view message)
+static void WriteConsoleLine(bool toStderr, std::string_view message)
 {
     std::lock_guard<std::mutex> lock(g_consoleLogMutex);
     std::ostream& out = toStderr ? std::cerr : std::cout;
     out << message << '\n' << std::flush;
 }
 
-std::string PathToUtf8(const std::filesystem::path& path)
+static std::string PathToUtf8(const std::filesystem::path& path)
 {
 #ifdef _WIN32
     const std::wstring& wide = path.native();
@@ -62,7 +60,7 @@ std::string PathToUtf8(const std::filesystem::path& path)
 #endif
 }
 
-std::filesystem::path PathFromUtf8(std::string_view utf8)
+static std::filesystem::path PathFromUtf8(std::string_view utf8)
 {
 #ifdef _WIN32
     if (utf8.empty())
@@ -80,7 +78,7 @@ std::filesystem::path PathFromUtf8(std::string_view utf8)
 #endif
 }
 
-std::string ToLowerAscii(std::string_view input)
+static std::string ToLowerAscii(std::string_view input)
 {
     std::string result(input.size(), '\0');
     std::transform(input.begin(), input.end(), result.begin(), [](unsigned char ch) {
@@ -90,7 +88,7 @@ std::string ToLowerAscii(std::string_view input)
 }
 
 #ifdef _WIN32
-std::filesystem::path GetModuleDirectory(HMODULE moduleHandle)
+static std::filesystem::path GetModuleDirectory(HMODULE moduleHandle)
 {
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
@@ -105,7 +103,7 @@ std::filesystem::path GetModuleDirectory(HMODULE moduleHandle)
     }
 }
 
-std::filesystem::path GetCurrentDllDirectory()
+static std::filesystem::path GetCurrentDllDirectory()
 {
     HMODULE thisModule = nullptr;
     if (!GetModuleHandleExW(
@@ -118,7 +116,7 @@ std::filesystem::path GetCurrentDllDirectory()
 }
 #endif
 
-void RegisterUsdPluginsForDirectory(const std::filesystem::path& baseDir, std::vector<std::string>& pluginPaths)
+static void RegisterUsdPluginsForDirectory(const std::filesystem::path& baseDir, std::vector<std::string>& pluginPaths)
 {
     if (baseDir.empty())
         return;
@@ -150,7 +148,7 @@ void RegisterUsdPluginsForDirectory(const std::filesystem::path& baseDir, std::v
     }
 }
 
-void EnsureUsdPluginsRegistered()
+static void EnsureUsdPluginsRegistered()
 {
     static std::once_flag onceFlag;
     std::call_once(onceFlag, []() {
@@ -167,7 +165,7 @@ void EnsureUsdPluginsRegistered()
     });
 }
 
-std::unordered_set<std::string> CollectSupportedExtensions()
+static std::unordered_set<std::string> CollectSupportedExtensions()
 {
     EnsureUsdPluginsRegistered();
 
@@ -191,7 +189,7 @@ std::unordered_set<std::string> CollectSupportedExtensions()
     return extensions;
 }
 
-bool IsSupportedAssetFile(
+static bool IsSupportedAssetFile(
     const std::filesystem::path& filePath,
     const std::string& fileNameUtf8,
     const std::unordered_set<std::string>& supportedExtensions)
@@ -212,7 +210,7 @@ bool IsSupportedAssetFile(
     return false;
 }
 
-std::optional<std::string> NormalizeRelativeDir(std::string_view rawDir)
+static std::optional<std::string> NormalizeRelativeDir(std::string_view rawDir)
 {
     std::string normalized;
     size_t pos = 0;
@@ -242,7 +240,7 @@ std::optional<std::string> NormalizeRelativeDir(std::string_view rawDir)
     return normalized;
 }
 
-std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
+static std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
 {
     std::error_code ec;
     std::filesystem::path norm = std::filesystem::weakly_canonical(path, ec);
@@ -263,7 +261,7 @@ std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
 #endif
 }
 
-bool IsScreenshotNewerThanSource(
+static bool IsScreenshotNewerThanSource(
     const std::filesystem::path& sourcePath,
     const std::filesystem::path& screenshotPath)
 {
@@ -286,12 +284,12 @@ bool IsScreenshotNewerThanSource(
 }
 
 #ifdef _WIN32
-constexpr std::string_view kWorkerPrefixReady = "@@READY";
-constexpr std::string_view kWorkerPrefixOk = "@@OK";
-constexpr std::string_view kWorkerPrefixErr = "@@ERR";
-constexpr std::string_view kWorkerCommandQuit = "@@QUIT";
+static constexpr std::string_view kWorkerPrefixReady = "@@READY";
+static constexpr std::string_view kWorkerPrefixOk = "@@OK";
+static constexpr std::string_view kWorkerPrefixErr = "@@ERR";
+static constexpr std::string_view kWorkerCommandQuit = "@@QUIT";
 
-std::string SanitizeSingleLine(std::string text)
+static std::string SanitizeSingleLine(std::string text)
 {
     for (char& ch : text) {
         if (ch == '\r' || ch == '\n' || ch == '\t')
@@ -300,7 +298,7 @@ std::string SanitizeSingleLine(std::string text)
     return text;
 }
 
-std::wstring QuoteWin32Arg(std::wstring_view arg)
+static std::wstring QuoteWin32Arg(std::wstring_view arg)
 {
     if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring_view::npos)
         return std::wstring(arg);
@@ -329,7 +327,7 @@ std::wstring QuoteWin32Arg(std::wstring_view arg)
     return quoted;
 }
 
-std::filesystem::path ResolveScreenshotExecutablePath()
+static std::filesystem::path ResolveScreenshotExecutablePath()
 {
     const std::filesystem::path dllDir = GetCurrentDllDirectory();
     if (!dllDir.empty()) {
@@ -1576,8 +1574,6 @@ private:
     std::atomic<bool> m_running{ false };
     ScreenshotWorkerPool m_screenshotPool;
 };
-
-} // namespace
 
 IAssetDatabasePtr CreateAssetDatabase()
 {

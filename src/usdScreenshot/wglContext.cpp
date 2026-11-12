@@ -5,25 +5,23 @@
 #include <windows.h>
 #include <GL/gl.h>
 
-namespace {
+static constexpr int WGL_DRAW_TO_WINDOW_ARB = 0x2001;
+static constexpr int WGL_ACCELERATION_ARB = 0x2003;
+static constexpr int WGL_SUPPORT_OPENGL_ARB = 0x2010;
+static constexpr int WGL_DOUBLE_BUFFER_ARB = 0x2011;
+static constexpr int WGL_PIXEL_TYPE_ARB = 0x2013;
+static constexpr int WGL_COLOR_BITS_ARB = 0x2014;
+static constexpr int WGL_ALPHA_BITS_ARB = 0x201B;
+static constexpr int WGL_DEPTH_BITS_ARB = 0x2022;
+static constexpr int WGL_STENCIL_BITS_ARB = 0x2023;
+static constexpr int WGL_FULL_ACCELERATION_ARB = 0x2027;
+static constexpr int WGL_TYPE_RGBA_ARB = 0x202B;
 
-constexpr int WGL_DRAW_TO_WINDOW_ARB = 0x2001;
-constexpr int WGL_ACCELERATION_ARB = 0x2003;
-constexpr int WGL_SUPPORT_OPENGL_ARB = 0x2010;
-constexpr int WGL_DOUBLE_BUFFER_ARB = 0x2011;
-constexpr int WGL_PIXEL_TYPE_ARB = 0x2013;
-constexpr int WGL_COLOR_BITS_ARB = 0x2014;
-constexpr int WGL_ALPHA_BITS_ARB = 0x201B;
-constexpr int WGL_DEPTH_BITS_ARB = 0x2022;
-constexpr int WGL_STENCIL_BITS_ARB = 0x2023;
-constexpr int WGL_FULL_ACCELERATION_ARB = 0x2027;
-constexpr int WGL_TYPE_RGBA_ARB = 0x202B;
-
-constexpr int WGL_CONTEXT_MAJOR_VERSION_ARB = 0x2091;
-constexpr int WGL_CONTEXT_MINOR_VERSION_ARB = 0x2092;
-constexpr int WGL_CONTEXT_PROFILE_MASK_ARB = 0x9126;
-constexpr int WGL_CONTEXT_CORE_PROFILE_BIT_ARB = 0x00000001;
-constexpr int WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
+static constexpr int WGL_CONTEXT_MAJOR_VERSION_ARB = 0x2091;
+static constexpr int WGL_CONTEXT_MINOR_VERSION_ARB = 0x2092;
+static constexpr int WGL_CONTEXT_PROFILE_MASK_ARB = 0x9126;
+static constexpr int WGL_CONTEXT_CORE_PROFILE_BIT_ARB = 0x00000001;
+static constexpr int WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
 
 using PFNWGLCHOOSEPIXELFORMATARBPROC = BOOL(WINAPI*)(
     HDC hdc,
@@ -38,9 +36,9 @@ using PFNWGLCREATECONTEXTATTRIBSARBPROC = HGLRC(WINAPI*)(
     HGLRC hShareContext,
     const int* attribList);
 
-constexpr wchar_t kWindowClassName[] = L"UsdScreenshotHiddenWglWindow";
+static constexpr wchar_t kWindowClassName[] = L"UsdScreenshotHiddenWglWindow";
 
-bool EnsureWindowClassRegistered()
+static bool EnsureWindowClassRegistered()
 {
     static bool registered = false;
     if (registered)
@@ -60,7 +58,7 @@ bool EnsureWindowClassRegistered()
     return true;
 }
 
-HWND CreateHiddenWindow()
+static HWND CreateHiddenWindow()
 {
     return CreateWindowExW(
         0,
@@ -74,7 +72,7 @@ HWND CreateHiddenWindow()
         nullptr);
 }
 
-PIXELFORMATDESCRIPTOR MakeDefaultPixelFormatDescriptor()
+static PIXELFORMATDESCRIPTOR MakeDefaultPixelFormatDescriptor()
 {
     PIXELFORMATDESCRIPTOR pfd{};
     pfd.nSize = sizeof(pfd);
@@ -89,13 +87,11 @@ PIXELFORMATDESCRIPTOR MakeDefaultPixelFormatDescriptor()
     return pfd;
 }
 
-void SetError(std::string* outError, const char* msg)
+static void SetError(std::string* outError, const char* msg)
 {
     if (outError)
         *outError = msg;
 }
-
-} // namespace
 
 OffscreenWglContext::~OffscreenWglContext()
 {

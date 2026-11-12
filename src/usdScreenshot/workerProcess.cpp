@@ -18,14 +18,12 @@
 #include <thread>
 #include <vector>
 
-namespace {
+static constexpr std::string_view kPrefixReady = "@@READY";
+static constexpr std::string_view kPrefixOk = "@@OK";
+static constexpr std::string_view kPrefixErr = "@@ERR";
+static constexpr std::string_view kCommandQuit = "@@QUIT";
 
-constexpr std::string_view kPrefixReady = "@@READY";
-constexpr std::string_view kPrefixOk = "@@OK";
-constexpr std::string_view kPrefixErr = "@@ERR";
-constexpr std::string_view kCommandQuit = "@@QUIT";
-
-std::string SanitizeSingleLine(std::string text)
+static std::string SanitizeSingleLine(std::string text)
 {
     for (char& ch : text) {
         if (ch == '\r' || ch == '\n' || ch == '\t')
@@ -34,7 +32,7 @@ std::string SanitizeSingleLine(std::string text)
     return text;
 }
 
-std::wstring Utf8ToWide(const std::string& utf8)
+static std::wstring Utf8ToWide(const std::string& utf8)
 {
     if (utf8.empty())
         return {};
@@ -46,7 +44,7 @@ std::wstring Utf8ToWide(const std::string& utf8)
     return wide;
 }
 
-std::wstring GetSelfExecutablePath()
+static std::wstring GetSelfExecutablePath()
 {
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
@@ -61,7 +59,7 @@ std::wstring GetSelfExecutablePath()
     }
 }
 
-std::wstring QuoteWin32Arg(std::wstring_view arg)
+static std::wstring QuoteWin32Arg(std::wstring_view arg)
 {
     if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring_view::npos)
         return std::wstring(arg);
@@ -90,7 +88,7 @@ std::wstring QuoteWin32Arg(std::wstring_view arg)
     return quoted;
 }
 
-std::wstring BuildWorkerCommandLine(const std::wstring& exePath, const RenderOptions& opts)
+static std::wstring BuildWorkerCommandLine(const std::wstring& exePath, const RenderOptions& opts)
 {
     std::vector<std::wstring> args;
     args.push_back(exePath);
@@ -516,8 +514,6 @@ private:
     HANDLE m_stdoutRead = nullptr;
     std::string m_readBuffer;
 };
-
-} // namespace
 
 int RunWorkerMode(const RenderOptions& renderOptions)
 {

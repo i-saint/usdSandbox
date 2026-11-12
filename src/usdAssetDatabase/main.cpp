@@ -13,11 +13,9 @@
 #include <string_view>
 #include <vector>
 
-namespace {
+static HANDLE g_shutdownEvent = nullptr;
 
-HANDLE g_shutdownEvent = nullptr;
-
-BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
+static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
 {
     switch (ctrlType) {
     case CTRL_C_EVENT:
@@ -32,7 +30,7 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
     }
 }
 
-std::string WideToUtf8(std::wstring_view wide)
+static std::string WideToUtf8(std::wstring_view wide)
 {
     if (wide.empty())
         return {};
@@ -46,7 +44,7 @@ std::string WideToUtf8(std::wstring_view wide)
     return utf8;
 }
 
-std::filesystem::path PathFromUtf8(std::string_view utf8)
+static std::filesystem::path PathFromUtf8(std::string_view utf8)
 {
     if (utf8.empty())
         return {};
@@ -60,7 +58,7 @@ std::filesystem::path PathFromUtf8(std::string_view utf8)
     return std::filesystem::path(wide);
 }
 
-std::string PathToUtf8(const std::filesystem::path& path)
+static std::string PathToUtf8(const std::filesystem::path& path)
 {
     return WideToUtf8(path.native());
 }
@@ -80,7 +78,7 @@ struct CliOptions
     bool showHelp = false;
 };
 
-std::string ToLowerAscii(std::string_view input)
+static std::string ToLowerAscii(std::string_view input)
 {
     std::string lower(input.size(), '\0');
     std::transform(input.begin(), input.end(), lower.begin(), [](unsigned char ch) {
@@ -89,7 +87,7 @@ std::string ToLowerAscii(std::string_view input)
     return lower;
 }
 
-const char* LogLevelToString(IAssetDatabase::LogLevel level)
+static const char* LogLevelToString(IAssetDatabase::LogLevel level)
 {
     switch (level) {
     case IAssetDatabase::LogLevel::Silent: return "silent";
@@ -100,7 +98,7 @@ const char* LogLevelToString(IAssetDatabase::LogLevel level)
     }
 }
 
-bool ParseLogLevel(std::string_view value, IAssetDatabase::LogLevel* outLevel)
+static bool ParseLogLevel(std::string_view value, IAssetDatabase::LogLevel* outLevel)
 {
     const std::string lower = ToLowerAscii(value);
     if (lower == "silent" || lower == "none" || lower == "off" || lower == "0") {
@@ -122,7 +120,7 @@ bool ParseLogLevel(std::string_view value, IAssetDatabase::LogLevel* outLevel)
     return false;
 }
 
-void PrintUsage()
+static void PrintUsage()
 {
     std::cout <<
         "Usage:\n"
@@ -140,7 +138,7 @@ void PrintUsage()
         "  -h, --help               Show this help message\n";
 }
 
-bool ParseCommandLine(
+static bool ParseCommandLine(
     const std::vector<std::string>& args,
     const std::filesystem::path& currentDir,
     CliOptions* outOptions,
@@ -254,8 +252,6 @@ bool ParseCommandLine(
 
     return true;
 }
-
-} // namespace
 
 int wmain(int argc, wchar_t* argv[])
 {

@@ -18,9 +18,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace {
-
-std::string WideToUtf8(std::wstring_view wide)
+static std::string WideToUtf8(std::wstring_view wide)
 {
     if (wide.empty())
         return {};
@@ -32,7 +30,7 @@ std::string WideToUtf8(std::wstring_view wide)
     return utf8;
 }
 
-std::filesystem::path PathFromUtf8(const std::string& utf8)
+static std::filesystem::path PathFromUtf8(const std::string& utf8)
 {
     if (utf8.empty())
         return {};
@@ -44,19 +42,19 @@ std::filesystem::path PathFromUtf8(const std::string& utf8)
     return std::filesystem::path(wide);
 }
 
-std::string PathToUtf8(const std::filesystem::path& path)
+static std::string PathToUtf8(const std::filesystem::path& path)
 {
     return WideToUtf8(path.native());
 }
 
-std::string ToLowerAscii(std::string s)
+static std::string ToLowerAscii(std::string s)
 {
     for (char& ch : s)
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     return s;
 }
 
-std::string Trim(std::string_view sv)
+static std::string Trim(std::string_view sv)
 {
     while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n'))
         sv.remove_prefix(1);
@@ -65,7 +63,7 @@ std::string Trim(std::string_view sv)
     return std::string(sv);
 }
 
-std::vector<std::string> SplitCsvOrSpace(std::string_view text)
+static std::vector<std::string> SplitCsvOrSpace(std::string_view text)
 {
     std::vector<std::string> items;
     std::string current;
@@ -85,7 +83,7 @@ std::vector<std::string> SplitCsvOrSpace(std::string_view text)
     return items;
 }
 
-bool ParseComplexity(const std::string& value, float* outComplexity)
+static bool ParseComplexity(const std::string& value, float* outComplexity)
 {
     const std::string lower = ToLowerAscii(value);
     if (lower == "low") {
@@ -114,7 +112,7 @@ bool ParseComplexity(const std::string& value, float* outComplexity)
     return false;
 }
 
-void PrintUsage()
+static void PrintUsage()
 {
     std::cout <<
         "Usage:\n"
@@ -171,7 +169,7 @@ struct CliConfig
     std::vector<std::string> positionalArgs;
 };
 
-bool ParseCommandLine(const std::vector<std::string>& args, CliConfig* cfg, std::string* errorMsg)
+static bool ParseCommandLine(const std::vector<std::string>& args, CliConfig* cfg, std::string* errorMsg)
 {
     for (size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
@@ -358,7 +356,7 @@ bool ParseCommandLine(const std::vector<std::string>& args, CliConfig* cfg, std:
     return true;
 }
 
-bool CollectTasks(
+static bool CollectTasks(
     const CliConfig& cfg,
     std::vector<ScreenshotTask>* outTasks,
     size_t* outSkippedCount,
@@ -513,7 +511,7 @@ bool CollectTasks(
     return true;
 }
 
-int RunInProcessBatch(
+static int RunInProcessBatch(
     const std::vector<ScreenshotTask>& tasks,
     const RenderOptions& renderOptions,
     const CoordinatorOptions& coordinatorOptions,
@@ -553,8 +551,6 @@ int RunInProcessBatch(
 
     return failed == 0 ? 0 : 1;
 }
-
-} // namespace
 
 int wmain(int argc, wchar_t* argv[])
 {

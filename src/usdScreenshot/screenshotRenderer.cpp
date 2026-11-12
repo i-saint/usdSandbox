@@ -31,9 +31,7 @@
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
-namespace {
-
-std::filesystem::path PathFromUtf8(const std::string& utf8)
+static std::filesystem::path PathFromUtf8(const std::string& utf8)
 {
     if (utf8.empty())
         return {};
@@ -45,7 +43,7 @@ std::filesystem::path PathFromUtf8(const std::string& utf8)
     return std::filesystem::path(wide);
 }
 
-std::string PathToUtf8(const std::filesystem::path& path)
+static std::string PathToUtf8(const std::filesystem::path& path)
 {
     const std::wstring& wide = path.native();
     if (wide.empty())
@@ -58,7 +56,7 @@ std::string PathToUtf8(const std::filesystem::path& path)
     return utf8;
 }
 
-std::filesystem::path GetExecutableDirectory()
+static std::filesystem::path GetExecutableDirectory()
 {
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
@@ -73,7 +71,7 @@ std::filesystem::path GetExecutableDirectory()
     }
 }
 
-TfToken ResolveRendererPluginId(const std::string& requestedName)
+static TfToken ResolveRendererPluginId(const std::string& requestedName)
 {
     if (requestedName.empty())
         return TfToken();
@@ -90,7 +88,7 @@ TfToken ResolveRendererPluginId(const std::string& requestedName)
     return TfToken(requestedName);
 }
 
-std::string CollectErrors(const TfErrorMark& mark, const std::string& fallbackMessage)
+static std::string CollectErrors(const TfErrorMark& mark, const std::string& fallbackMessage)
 {
     if (mark.IsClean())
         return fallbackMessage;
@@ -107,7 +105,7 @@ std::string CollectErrors(const TfErrorMark& mark, const std::string& fallbackMe
     return combined.empty() ? fallbackMessage : combined;
 }
 
-UsdGeomCamera ResolveCameraForStage(
+static UsdGeomCamera ResolveCameraForStage(
     const UsdStageRefPtr& stage,
     const std::string& requestedCamera,
     const SdfPath& renderSettingsPath)
@@ -136,8 +134,6 @@ UsdGeomCamera ResolveCameraForStage(
 
     return usdCamera;
 }
-
-} // namespace
 
 void RegisterUsdPluginsFromExecutableDir()
 {
