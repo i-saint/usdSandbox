@@ -661,7 +661,7 @@ private:
 class ScreenshotWorkerPool
 {
 public:
-    static constexpr size_t kWorkerCount = 4;
+    static constexpr size_t kDefaultWorkerCount = 4;
     static constexpr size_t kImageWidth = 512;
 
     ScreenshotWorkerPool() = default;
@@ -674,24 +674,56 @@ public:
     ScreenshotWorkerPool(const ScreenshotWorkerPool&) = delete;
     ScreenshotWorkerPool& operator=(const ScreenshotWorkerPool&) = delete;
 
+    void SetWorkerCount(size_t workerCount)
+    {
+#ifdef _WIN32
+        bool restartNeeded = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_configuredWorkerCount == workerCount)
+                return;
+            m_configuredWorkerCount = workerCount;
+            restartNeeded = m_started && !m_stopping;
+        }
+        if (restartNeeded) {
+            Stop();
+            Start();
+        }
+#else
+        m_configuredWorkerCount = workerCount;
+#endif
+    }
+
+    size_t GetWorkerCount() const
+    {
+#ifdef _WIN32
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_configuredWorkerCount;
+#else
+        return m_configuredWorkerCount;
+#endif
+    }
+
     void Start()
     {
 #ifdef _WIN32
         std::lock_guard<std::mutex> lifecycleLock(m_lifecycleMutex);
 
+        size_t slotCount = 0;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_started)
                 return;
 
             m_stopping = false;
-            m_workerExePath = ResolveScreenshotExecutablePath();
+            slotCount = m_configuredWorkerCount;
+            m_workerExePath = (slotCount > 0) ? ResolveScreenshotExecutablePath() : std::filesystem::path();
             m_workerWorkDir = m_workerExePath.empty() ? std::filesystem::path() : m_workerExePath.parent_path();
 
-            if (!m_workerExePath.empty()) {
+            if (!m_workerExePath.empty() && slotCount > 0) {
                 const unsigned int hwThreads = std::max(1u, std::thread::hardware_concurrency());
                 const unsigned int threadsPerWorker =
-                    std::max(1u, hwThreads / static_cast<unsigned int>(kWorkerCount));
+                    std::max(1u, hwThreads / static_cast<unsigned int>(slotCount));
                 m_workerCommandLine = QuoteWin32Arg(m_workerExePath.native()) +
                                       L" --worker --imageWidth " + std::to_wstring(kImageWidth) +
                                       L" --threadsPerWorker " + std::to_wstring(threadsPerWorker);
@@ -700,16 +732,20 @@ public:
                 m_workerCommandLine.clear();
             }
 
-            for (size_t i = 0; i < kWorkerCount; ++i) {
-                m_slots[i].disabled = m_workerCommandLine.empty();
-                m_slots[i].busy.store(false);
-                m_slots[i].scheduled = false;
+            m_slots.clear();
+            m_slots.reserve(slotCount);
+            for (size_t i = 0; i < slotCount; ++i) {
+                auto slot = std::make_unique<WorkerSlot>();
+                slot->disabled = m_workerCommandLine.empty();
+                slot->busy.store(false);
+                slot->scheduled = false;
+                m_slots.push_back(std::move(slot));
             }
         }
 
         if (!m_workerCommandLine.empty()) {
-            for (size_t i = 0; i < kWorkerCount; ++i)
-                EnsureWorkerProcessStarted(m_slots[i]);
+            for (size_t i = 0; i < slotCount; ++i)
+                EnsureWorkerProcessStarted(*m_slots[i]);
         }
 
         {
@@ -737,21 +773,20 @@ public:
 
         m_completionCv.notify_all();
 
-        for (size_t i = 0; i < kWorkerCount; ++i) {
-            if (m_slots[i].busy.load())
-                m_slots[i].client.TerminateChildProcess();
+        for (const auto& slot : m_slots) {
+            if (slot->busy.load())
+                slot->client.TerminateChildProcess();
         }
 
         m_taskGroup.wait();
 
-        for (size_t i = 0; i < kWorkerCount; ++i)
-            m_slots[i].client.Shutdown(false);
+        for (const auto& slot : m_slots)
+            slot->client.Shutdown(false);
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_activeKeys.clear();
-            for (size_t i = 0; i < kWorkerCount; ++i)
-                m_slots[i].scheduled = false;
+            m_slots.clear();
             m_started = false;
             m_stopping = false;
         }
@@ -792,12 +827,12 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_started || m_stopping)
+            if (!m_started || m_stopping || m_slots.empty())
                 return;
 
             bool anyWorkerUsable = false;
-            for (size_t i = 0; i < kWorkerCount; ++i) {
-                if (!m_slots[i].disabled) {
+            for (const auto& slot : m_slots) {
+                if (!slot->disabled) {
                     anyWorkerUsable = true;
                     break;
                 }
@@ -813,9 +848,9 @@ public:
             }
 
             size_t pendingTasks = m_queue.size();
-            for (size_t i = 0; i < kWorkerCount && pendingTasks > 0; ++i) {
-                if (!m_slots[i].disabled && !m_slots[i].scheduled) {
-                    m_slots[i].scheduled = true;
+            for (size_t i = 0; i < m_slots.size() && pendingTasks > 0; ++i) {
+                if (!m_slots[i]->disabled && !m_slots[i]->scheduled) {
+                    m_slots[i]->scheduled = true;
                     --pendingTasks;
                     m_taskGroup.run([this, i]() {
                         DrainQueueWithWorker(i);
@@ -889,7 +924,7 @@ private:
 
     void DrainQueueWithWorker(size_t workerIndex)
     {
-        WorkerSlot& slot = m_slots[workerIndex];
+        WorkerSlot& slot = *m_slots[workerIndex];
 
         for (;;) {
             Task task;
@@ -957,10 +992,11 @@ private:
     }
 
     std::mutex m_lifecycleMutex;
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     std::condition_variable m_completionCv;
     std::deque<Task> m_queue;
     std::unordered_set<std::wstring> m_activeKeys;
+    size_t m_configuredWorkerCount = kDefaultWorkerCount;
     bool m_started = false;
     std::atomic<bool> m_stopping{ false };
 
@@ -970,7 +1006,9 @@ private:
     std::filesystem::path m_workerExePath;
     std::filesystem::path m_workerWorkDir;
     std::wstring m_workerCommandLine;
-    std::array<WorkerSlot, kWorkerCount> m_slots;
+    std::vector<std::unique_ptr<WorkerSlot>> m_slots;
+#else
+    size_t m_configuredWorkerCount = kDefaultWorkerCount;
 #endif
 };
 
@@ -1082,6 +1120,47 @@ public:
         if (it == m_directories.end())
             return std::nullopt;
         return it->second;
+    }
+
+    bool SetServerRootDirectory(const std::filesystem::path& serverRootDirectory) override
+    {
+        if (serverRootDirectory.empty()) {
+            std::unique_lock lock(m_dataMutex);
+            m_serverRootDirectory.clear();
+            return true;
+        }
+
+        std::error_code ec;
+        const std::filesystem::path normalizedRoot =
+            std::filesystem::weakly_canonical(serverRootDirectory, ec);
+        const std::filesystem::path effectiveRoot =
+            ec ? serverRootDirectory.lexically_normal() : normalizedRoot;
+
+        ec.clear();
+        if (effectiveRoot.empty() || !std::filesystem::exists(effectiveRoot, ec) ||
+            !std::filesystem::is_directory(effectiveRoot, ec)) {
+            return false;
+        }
+
+        std::unique_lock lock(m_dataMutex);
+        m_serverRootDirectory = effectiveRoot;
+        return true;
+    }
+
+    std::filesystem::path GetServerRootDirectory() const override
+    {
+        std::shared_lock lock(m_dataMutex);
+        return m_serverRootDirectory;
+    }
+
+    void SetScreenshotWorkerCount(size_t workerCount) override
+    {
+        m_screenshotPool.SetWorkerCount(workerCount);
+    }
+
+    size_t GetScreenshotWorkerCount() const override
+    {
+        return m_screenshotPool.GetWorkerCount();
     }
 
     bool StartServer(const std::string& host, int port) override
@@ -1230,68 +1309,86 @@ private:
             res.set_content(body.dump(), "application/json; charset=utf-8");
         });
 
-        svr.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
-            const std::filesystem::path rootDir = GetRootDirectory();
-            if (rootDir.empty()) {
-                res.status = 404;
-                return;
-            }
-
-            if (req.path.find('\0') != std::string::npos || req.path.find(':') != std::string::npos) {
-                res.status = 400;
-                return;
-            }
-
-            const std::optional<std::string> normalized = NormalizeRelativeDir(req.path);
-            if (!normalized.has_value()) {
-                res.status = 400;
-                return;
-            }
-
-            std::filesystem::path targetPath =
-                normalized->empty() ? rootDir : (rootDir / PathFromUtf8(*normalized));
-
-            std::error_code ec;
-            if (std::filesystem::is_directory(targetPath, ec) && !ec) {
-                if (!req.path.empty() && req.path.back() != '/') {
-                    res.set_redirect(req.path + "/", httplib::StatusCode::MovedPermanently_301);
-                    return;
-                }
-                targetPath /= "index.html";
-            }
-
-            if (ToLowerAscii(PathToUtf8(targetPath.extension())) == ".jpg")
-                m_screenshotPool.WaitForPendingScreenshot(targetPath);
-
-            ec.clear();
-            if (!std::filesystem::is_regular_file(targetPath, ec) || ec) {
-                res.status = 404;
-                return;
-            }
-
-            const std::string targetUtf8 = PathToUtf8(targetPath);
-            httplib::detail::FileStat stat(targetUtf8);
-            if (!stat.is_file()) {
-                res.status = 404;
-                return;
-            }
-
-            const std::string etag = httplib::detail::compute_etag(stat);
-            if (!etag.empty())
-                res.set_header("ETag", etag);
-
-            const std::string lastModified = httplib::detail::file_mtime_to_http_date(stat.mtime());
-            if (!lastModified.empty())
-                res.set_header("Last-Modified", lastModified);
-
-            if (req.has_header("If-None-Match") && !etag.empty() &&
-                req.get_header_value("If-None-Match") == etag) {
-                res.status = 304;
-                return;
-            }
-
-            res.set_file_content(targetUtf8);
+        svr.Get(R"(/files(?:/.*)?)", [this](const httplib::Request& req, httplib::Response& res) {
+            constexpr std::string_view kFilesPrefix = "/files";
+            const std::string_view subPath = std::string_view(req.path).substr(kFilesPrefix.size());
+            ServeStaticFileFromRoot(GetRootDirectory(), subPath, true, req, res);
         });
+
+        svr.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
+            ServeStaticFileFromRoot(GetServerRootDirectory(), req.path, false, req, res);
+        });
+    }
+
+    void ServeStaticFileFromRoot(
+        const std::filesystem::path& baseDir,
+        std::string_view requestSubPath,
+        bool waitForPendingScreenshot,
+        const httplib::Request& req,
+        httplib::Response& res)
+    {
+        if (baseDir.empty()) {
+            res.status = 404;
+            return;
+        }
+
+        if (requestSubPath.find('\0') != std::string_view::npos ||
+            requestSubPath.find(':') != std::string_view::npos) {
+            res.status = 400;
+            return;
+        }
+
+        const std::optional<std::string> normalized = NormalizeRelativeDir(requestSubPath);
+        if (!normalized.has_value()) {
+            res.status = 400;
+            return;
+        }
+
+        std::filesystem::path targetPath =
+            normalized->empty() ? baseDir : (baseDir / PathFromUtf8(*normalized));
+
+        std::error_code ec;
+        if (std::filesystem::is_directory(targetPath, ec) && !ec) {
+            if (!req.path.empty() && req.path.back() != '/') {
+                res.set_redirect(req.path + "/", httplib::StatusCode::MovedPermanently_301);
+                return;
+            }
+            targetPath /= "index.html";
+        }
+
+        if (waitForPendingScreenshot &&
+            ToLowerAscii(PathToUtf8(targetPath.extension())) == ".jpg") {
+            m_screenshotPool.WaitForPendingScreenshot(targetPath);
+        }
+
+        ec.clear();
+        if (!std::filesystem::is_regular_file(targetPath, ec) || ec) {
+            res.status = 404;
+            return;
+        }
+
+        const std::string targetUtf8 = PathToUtf8(targetPath);
+        httplib::detail::FileStat stat(targetUtf8);
+        if (!stat.is_file()) {
+            res.status = 404;
+            return;
+        }
+
+        const std::string etag = httplib::detail::compute_etag(stat);
+        if (!etag.empty())
+            res.set_header("ETag", etag);
+
+        const std::string lastModified = httplib::detail::file_mtime_to_http_date(stat.mtime());
+        if (!lastModified.empty())
+            res.set_header("Last-Modified", lastModified);
+
+        if (req.has_header("If-None-Match") && !etag.empty() &&
+            req.get_header_value("If-None-Match") == etag) {
+            res.status = 304;
+            return;
+        }
+
+        res.set_file_content(targetUtf8);
     }
 
     bool BindServerLocked(const std::string& host, int port, std::unique_ptr<httplib::Server>& outServer)
@@ -1379,6 +1476,7 @@ private:
 
     mutable std::shared_mutex m_dataMutex;
     std::filesystem::path m_rootDirectory;
+    std::filesystem::path m_serverRootDirectory;
     std::map<std::string, DirectoryContents> m_directories;
 
     mutable std::mutex m_serverMutex;

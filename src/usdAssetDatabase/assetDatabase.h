@@ -1,21 +1,12 @@
 ﻿#pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifdef _WIN32
-#  ifdef USDASSETDATABASE_EXPORTS
-#    define USDASSETDATABASE_API __declspec(dllexport)
-#  else
-#    define USDASSETDATABASE_API __declspec(dllimport)
-#  endif
-#else
-#  define USDASSETDATABASE_API
-#endif
 
 class IAssetDatabase
 {
@@ -36,6 +27,12 @@ public:
     virtual std::vector<std::string> GetDirectories() const = 0;
     virtual std::optional<DirectoryContents> ListDirectory(std::string_view relativeDir = "") const = 0;
 
+    virtual bool SetServerRootDirectory(const std::filesystem::path& serverRootDirectory) = 0;
+    virtual std::filesystem::path GetServerRootDirectory() const = 0;
+
+    virtual void SetScreenshotWorkerCount(size_t workerCount) = 0;
+    virtual size_t GetScreenshotWorkerCount() const = 0;
+
     virtual bool StartServer(const std::string& host = "127.0.0.1", int port = 8080) = 0;
     virtual bool RunServer(const std::string& host = "127.0.0.1", int port = 8080) = 0;
     virtual void StopServer() = 0;
@@ -44,5 +41,5 @@ public:
 };
 using IAssetDatabasePtr = std::shared_ptr<IAssetDatabase>;
 
-USDASSETDATABASE_API IAssetDatabasePtr CreateAssetDatabase();
-USDASSETDATABASE_API IAssetDatabasePtr CreateAssetDatabase(const std::filesystem::path& rootDirectory);
+IAssetDatabasePtr CreateAssetDatabase();
+IAssetDatabasePtr CreateAssetDatabase(const std::filesystem::path& rootDirectory);

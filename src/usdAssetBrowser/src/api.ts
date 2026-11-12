@@ -1,4 +1,4 @@
-import type { TreeNode } from 'primevue/treenode'
+﻿import type { TreeNode } from 'primevue/treenode'
 
 export interface DirectoriesResponse {
   directories: string[]
@@ -75,7 +75,7 @@ export function buildScreenshotUrl(
   const base = normalizeBaseUrl(baseUrl)
   const segments = dir ? dir.split('/').filter(Boolean).map(encodeURIComponent) : []
   segments.push(encodeURIComponent(`${fileName}.jpg`))
-  const url = `${base}/${segments.join('/')}`
+  const url = `${base}/files/${segments.join('/')}`
   return reloadToken > 0 ? `${url}?r=${reloadToken}` : url
 }
 
