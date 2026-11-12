@@ -4,6 +4,8 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <filesystem>
 #include <iostream>
@@ -72,10 +74,53 @@ struct CliOptions
     bool htmlDirExplicit = false;
 
     size_t workerCount = 4;
+    IAssetDatabase::LogLevel logLevel = IAssetDatabase::LogLevel::Info;
     std::string host = "127.0.0.1";
     int port = 8080;
     bool showHelp = false;
 };
+
+std::string ToLowerAscii(std::string_view input)
+{
+    std::string lower(input.size(), '\0');
+    std::transform(input.begin(), input.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lower;
+}
+
+const char* LogLevelToString(IAssetDatabase::LogLevel level)
+{
+    switch (level) {
+    case IAssetDatabase::LogLevel::Silent: return "silent";
+    case IAssetDatabase::LogLevel::Error:  return "error";
+    case IAssetDatabase::LogLevel::Info:   return "info";
+    case IAssetDatabase::LogLevel::Debug:  return "debug";
+    default:                               return "info";
+    }
+}
+
+bool ParseLogLevel(std::string_view value, IAssetDatabase::LogLevel* outLevel)
+{
+    const std::string lower = ToLowerAscii(value);
+    if (lower == "silent" || lower == "none" || lower == "off" || lower == "0") {
+        *outLevel = IAssetDatabase::LogLevel::Silent;
+        return true;
+    }
+    if (lower == "error" || lower == "1") {
+        *outLevel = IAssetDatabase::LogLevel::Error;
+        return true;
+    }
+    if (lower == "info" || lower == "default" || lower == "2") {
+        *outLevel = IAssetDatabase::LogLevel::Info;
+        return true;
+    }
+    if (lower == "debug" || lower == "verbose" || lower == "3") {
+        *outLevel = IAssetDatabase::LogLevel::Debug;
+        return true;
+    }
+    return false;
+}
 
 void PrintUsage()
 {
@@ -87,6 +132,9 @@ void PrintUsage()
         "  -a, --assets <dir>       Asset root directory (default: ./assets)\n"
         "  -w, --html <dir>         HTTP static file root directory (default: ./html)\n"
         "  -j, --jobs <N>           Number of usdScreenshot worker processes (default: 4)\n"
+        "  -l, --logLevel <level>   Log level: silent, error, info, debug (default: info)\n"
+        "  -q, --quiet              Alias for --logLevel silent\n"
+        "  -v, --verbose            Alias for --logLevel debug\n"
         "      --host <addr>        HTTP bind address (default: 127.0.0.1)\n"
         "  -p, --port <port>        HTTP listen port (default: 8080, 0 = auto)\n"
         "  -h, --help               Show this help message\n";
@@ -144,6 +192,21 @@ bool ParseCommandLine(
                 return false;
             }
             outOptions->workerCount = jobs;
+        }
+        else if (arg == "-l" || arg == "--logLevel" || arg == "--log-level") {
+            std::string val;
+            if (!requireValue(arg.c_str(), &val))
+                return false;
+            if (!ParseLogLevel(val, &outOptions->logLevel)) {
+                *outError = "Invalid --logLevel value (expected silent, error, info, or debug): " + val;
+                return false;
+            }
+        }
+        else if (arg == "-q" || arg == "--quiet") {
+            outOptions->logLevel = IAssetDatabase::LogLevel::Silent;
+        }
+        else if (arg == "-v" || arg == "--verbose") {
+            outOptions->logLevel = IAssetDatabase::LogLevel::Debug;
         }
         else if (arg == "--host") {
             if (!requireValue(arg.c_str(), &outOptions->host))
@@ -219,28 +282,35 @@ int wmain(int argc, wchar_t* argv[])
     }
 
     IAssetDatabasePtr db = CreateAssetDatabase();
+    db->SetLogLevel(options.logLevel);
     db->SetScreenshotWorkerCount(options.workerCount);
 
     if (!db->Scan(options.assetsDir)) {
-        std::cerr << "Error: Assets directory does not exist or is not a directory: "
-                  << PathToUtf8(options.assetsDir) << "\n";
+        if (options.logLevel >= IAssetDatabase::LogLevel::Error) {
+            std::cerr << "Error: Assets directory does not exist or is not a directory: "
+                      << PathToUtf8(options.assetsDir) << "\n";
+        }
         return 1;
     }
 
     std::error_code ec;
     if (std::filesystem::exists(options.htmlDir, ec) && std::filesystem::is_directory(options.htmlDir, ec)) {
         if (!db->SetServerRootDirectory(options.htmlDir)) {
-            std::cerr << "Error: Failed to set HTML root directory: "
-                      << PathToUtf8(options.htmlDir) << "\n";
+            if (options.logLevel >= IAssetDatabase::LogLevel::Error) {
+                std::cerr << "Error: Failed to set HTML root directory: "
+                          << PathToUtf8(options.htmlDir) << "\n";
+            }
             return 1;
         }
     }
     else if (options.htmlDirExplicit) {
-        std::cerr << "Error: HTML directory does not exist or is not a directory: "
-                  << PathToUtf8(options.htmlDir) << "\n";
+        if (options.logLevel >= IAssetDatabase::LogLevel::Error) {
+            std::cerr << "Error: HTML directory does not exist or is not a directory: "
+                      << PathToUtf8(options.htmlDir) << "\n";
+        }
         return 1;
     }
-    else {
+    else if (options.logLevel >= IAssetDatabase::LogLevel::Info) {
         std::cout << "Note: Default HTML directory not found ("
                   << PathToUtf8(options.htmlDir) << "); static web root disabled.\n";
     }
@@ -249,8 +319,10 @@ int wmain(int argc, wchar_t* argv[])
     ::SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
     if (!db->StartServer(options.host, options.port)) {
-        std::cerr << "Error: Failed to start HTTP server on "
-                  << options.host << ":" << options.port << "\n";
+        if (options.logLevel >= IAssetDatabase::LogLevel::Error) {
+            std::cerr << "Error: Failed to start HTTP server on "
+                      << options.host << ":" << options.port << "\n";
+        }
         ::SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
         if (g_shutdownEvent) {
             ::CloseHandle(g_shutdownEvent);
@@ -259,23 +331,27 @@ int wmain(int argc, wchar_t* argv[])
         return 1;
     }
 
-    const int boundPort = db->GetServerPort();
-    std::cout << "USD Asset Database Server listening on http://"
-              << options.host << ":" << boundPort << "\n"
-              << "  Assets root : " << PathToUtf8(db->GetRootDirectory())
-              << " (" << db->GetDirectories().size() << " directories)\n"
-              << "  HTML root   : "
-              << (db->GetServerRootDirectory().empty()
-                      ? std::string("(disabled)")
-                      : PathToUtf8(db->GetServerRootDirectory()))
-              << "\n"
-              << "  Workers     : " << db->GetScreenshotWorkerCount() << "\n"
-              << "Press Ctrl+C to stop.\n" << std::flush;
+    if (options.logLevel >= IAssetDatabase::LogLevel::Info) {
+        const int boundPort = db->GetServerPort();
+        std::cout << "USD Asset Database Server listening on http://"
+                  << options.host << ":" << boundPort << "\n"
+                  << "  Assets root : " << PathToUtf8(db->GetRootDirectory())
+                  << " (" << db->GetDirectories().size() << " directories)\n"
+                  << "  HTML root   : "
+                  << (db->GetServerRootDirectory().empty()
+                          ? std::string("(disabled)")
+                          : PathToUtf8(db->GetServerRootDirectory()))
+                  << "\n"
+                  << "  Workers     : " << db->GetScreenshotWorkerCount() << "\n"
+                  << "  Log level   : " << LogLevelToString(db->GetLogLevel()) << "\n"
+                  << "Press Ctrl+C to stop.\n" << std::flush;
+    }
 
     if (g_shutdownEvent)
         ::WaitForSingleObject(g_shutdownEvent, INFINITE);
 
-    std::cout << "Stopping server...\n" << std::flush;
+    if (options.logLevel >= IAssetDatabase::LogLevel::Info)
+        std::cout << "Stopping server...\n" << std::flush;
     db->StopServer();
 
     ::SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);

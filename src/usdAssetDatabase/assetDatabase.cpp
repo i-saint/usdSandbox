@@ -19,9 +19,11 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <set>
@@ -31,6 +33,15 @@
 #include <utility>
 
 namespace {
+
+std::mutex g_consoleLogMutex;
+
+void WriteConsoleLine(bool toStderr, std::string_view message)
+{
+    std::lock_guard<std::mutex> lock(g_consoleLogMutex);
+    std::ostream& out = toStderr ? std::cerr : std::cout;
+    out << message << '\n' << std::flush;
+}
 
 std::string PathToUtf8(const std::filesystem::path& path)
 {
@@ -526,7 +537,8 @@ public:
     bool ExecuteTask(
         const std::string& sourcePathUtf8,
         const std::string& outputPathUtf8,
-        bool* outWorkerCrashed)
+        bool* outWorkerCrashed,
+        std::string* outErrorMessage)
     {
         if (outWorkerCrashed)
             *outWorkerCrashed = false;
@@ -539,6 +551,8 @@ public:
         if (!WriteAll(payload)) {
             if (outWorkerCrashed)
                 *outWorkerCrashed = true;
+            if (outErrorMessage)
+                *outErrorMessage = "Failed to write task to worker pipe.";
             return false;
         }
 
@@ -546,12 +560,21 @@ public:
         while (ReadLine(&line)) {
             if (line == kWorkerPrefixOk)
                 return true;
-            if (line.starts_with(kWorkerPrefixErr))
+            if (line.starts_with(kWorkerPrefixErr)) {
+                if (outErrorMessage) {
+                    const size_t tabPos = line.find('\t');
+                    *outErrorMessage = (tabPos != std::string::npos)
+                        ? line.substr(tabPos + 1)
+                        : "Worker reported error.";
+                }
                 return false;
+            }
         }
 
         if (outWorkerCrashed)
             *outWorkerCrashed = true;
+        if (outErrorMessage)
+            *outErrorMessage = "Worker process terminated unexpectedly.";
         return false;
     }
 
@@ -704,6 +727,16 @@ public:
 #endif
     }
 
+    void SetLogLevel(IAssetDatabase::LogLevel level)
+    {
+        m_logLevel.store(static_cast<int>(level), std::memory_order_relaxed);
+    }
+
+    IAssetDatabase::LogLevel GetLogLevel() const
+    {
+        return static_cast<IAssetDatabase::LogLevel>(m_logLevel.load(std::memory_order_relaxed));
+    }
+
     void Start()
     {
 #ifdef _WIN32
@@ -840,11 +873,20 @@ public:
             if (!anyWorkerUsable)
                 return;
 
+            size_t enqueuedCount = 0;
             for (Task& task : candidates) {
                 if (m_activeKeys.contains(task.key))
                     continue;
                 m_activeKeys.insert(task.key);
                 m_queue.push_back(std::move(task));
+                ++enqueuedCount;
+            }
+
+            if (enqueuedCount > 0 && GetLogLevel() >= IAssetDatabase::LogLevel::Debug) {
+                WriteConsoleLine(
+                    false,
+                    "[Screenshot] Queued " + std::to_string(enqueuedCount) +
+                        " file(s) in " + PathToUtf8(directoryPath));
             }
 
             size_t pendingTasks = m_queue.size();
@@ -962,32 +1004,61 @@ private:
         tempPath += L".tmp." + std::to_wstring(::GetCurrentProcessId()) + L"_" +
                     std::to_wstring(workerIndex) + L".jpg";
 
+        const std::string srcUtf8 = PathToUtf8(task.sourcePath);
+        const std::string dstUtf8 = PathToUtf8(task.screenshotPath);
+
+        if (GetLogLevel() >= IAssetDatabase::LogLevel::Info)
+            WriteConsoleLine(false, "[Screenshot] Capturing " + srcUtf8);
+
+        const auto startTime = std::chrono::steady_clock::now();
         bool workerCrashed = false;
+        std::string errorMessage;
         slot.busy.store(true);
         const bool ok = slot.client.ExecuteTask(
-            PathToUtf8(task.sourcePath),
+            srcUtf8,
             PathToUtf8(tempPath),
-            &workerCrashed);
+            &workerCrashed,
+            &errorMessage);
         slot.busy.store(false);
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime).count();
 
         if (ok) {
-            if (!::MoveFileExW(
-                    tempPath.c_str(),
-                    task.screenshotPath.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            bool moved = ::MoveFileExW(
+                             tempPath.c_str(),
+                             task.screenshotPath.c_str(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+            if (!moved) {
                 ::Sleep(15);
-                if (!::MoveFileExW(
-                        tempPath.c_str(),
-                        task.screenshotPath.c_str(),
-                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                moved = ::MoveFileExW(
+                            tempPath.c_str(),
+                            task.screenshotPath.c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+                if (!moved)
                     ::DeleteFileW(tempPath.c_str());
+            }
+
+            if (moved) {
+                if (GetLogLevel() >= IAssetDatabase::LogLevel::Info) {
+                    WriteConsoleLine(
+                        false,
+                        "[Screenshot] Saved " + dstUtf8 +
+                            " (" + std::to_string(elapsedMs) + " ms)");
                 }
+            }
+            else if (GetLogLevel() >= IAssetDatabase::LogLevel::Error) {
+                WriteConsoleLine(true, "[Screenshot] Failed to save " + dstUtf8);
             }
         }
         else {
             ::DeleteFileW(tempPath.c_str());
             if (workerCrashed)
                 slot.client.Shutdown(true);
+            if (!m_stopping && GetLogLevel() >= IAssetDatabase::LogLevel::Error) {
+                WriteConsoleLine(
+                    true,
+                    "[Screenshot] Failed " + srcUtf8 + " -> " + errorMessage);
+            }
         }
     }
 
@@ -997,6 +1068,7 @@ private:
     std::deque<Task> m_queue;
     std::unordered_set<std::wstring> m_activeKeys;
     size_t m_configuredWorkerCount = kDefaultWorkerCount;
+    std::atomic<int> m_logLevel{ static_cast<int>(IAssetDatabase::LogLevel::Info) };
     bool m_started = false;
     std::atomic<bool> m_stopping{ false };
 
@@ -1009,6 +1081,7 @@ private:
     std::vector<std::unique_ptr<WorkerSlot>> m_slots;
 #else
     size_t m_configuredWorkerCount = kDefaultWorkerCount;
+    std::atomic<int> m_logLevel{ static_cast<int>(IAssetDatabase::LogLevel::Info) };
 #endif
 };
 
@@ -1163,6 +1236,16 @@ public:
         return m_screenshotPool.GetWorkerCount();
     }
 
+    void SetLogLevel(LogLevel level) override
+    {
+        m_screenshotPool.SetLogLevel(level);
+    }
+
+    LogLevel GetLogLevel() const override
+    {
+        return m_screenshotPool.GetLogLevel();
+    }
+
     bool StartServer(const std::string& host, int port) override
     {
         std::lock_guard lock(m_serverMutex);
@@ -1251,6 +1334,13 @@ public:
 private:
     void ConfigureRoutes(httplib::Server& svr)
     {
+        svr.set_logger([this](const httplib::Request& req, const httplib::Response& res) {
+            if (GetLogLevel() >= LogLevel::Debug) {
+                WriteConsoleLine(
+                    false,
+                    "[HTTP] " + req.method + " " + req.path + " -> " + std::to_string(res.status));
+            }
+        });
         svr.set_default_headers({
             { "Access-Control-Allow-Origin", "*" },
         });

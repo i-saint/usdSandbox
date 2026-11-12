@@ -11,6 +11,14 @@
 class IAssetDatabase
 {
 public:
+    enum class LogLevel
+    {
+        Silent = 0,
+        Error = 1,
+        Info = 2,
+        Debug = 3,
+    };
+
     struct DirectoryContents
     {
         std::vector<std::string> directories;
@@ -32,6 +40,9 @@ public:
 
     virtual void SetScreenshotWorkerCount(size_t workerCount) = 0;
     virtual size_t GetScreenshotWorkerCount() const = 0;
+
+    virtual void SetLogLevel(LogLevel level) = 0;
+    virtual LogLevel GetLogLevel() const = 0;
 
     virtual bool StartServer(const std::string& host = "127.0.0.1", int port = 8080) = 0;
     virtual bool RunServer(const std::string& host = "127.0.0.1", int port = 8080) = 0;
