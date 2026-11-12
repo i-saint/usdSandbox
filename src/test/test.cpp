@@ -1,4 +1,4 @@
-﻿#include "../pch.h"
+﻿#include "../usdTerrain/pch.h"
 
 ARCH_IMPORT void TestExtractJsonFields();
 

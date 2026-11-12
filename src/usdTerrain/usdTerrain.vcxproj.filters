@@ -14,7 +14,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\externals\ufbx\ufbx.h">
+    <ClInclude Include="..\..\externals\ufbx\ufbx.h">
       <Filter>externals</Filter>
     </ClInclude>
     <ClInclude Include="fbxAnimation.h">
@@ -38,7 +38,7 @@
     <ClInclude Include="meshUtils.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\externals\simdjson\simdjson.h">
+    <ClInclude Include="..\..\externals\simdjson\simdjson.h">
       <Filter>externals</Filter>
     </ClInclude>
     <ClInclude Include="json.h">
@@ -64,7 +64,7 @@
     <ClCompile Include="hioLodImage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\externals\ufbx\ufbx.c">
+    <ClCompile Include="..\..\externals\ufbx\ufbx.c">
       <Filter>externals</Filter>
     </ClCompile>
     <ClCompile Include="fbxAnimation.cpp">
@@ -73,7 +73,7 @@
     <ClCompile Include="meshUtils.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\externals\simdjson\simdjson.cpp">
+    <ClCompile Include="..\..\externals\simdjson\simdjson.cpp">
       <Filter>externals</Filter>
     </ClCompile>
     <ClCompile Include="json.cpp">
@@ -84,6 +84,6 @@
     <None Include="plugInfo.json">
       <Filter>Resource Files</Filter>
     </None>
-    <None Include="vcpkg.json" />
+    <None Include="..\vcpkg.json" />
   </ItemGroup>
 </Project>

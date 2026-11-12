@@ -30,8 +30,8 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
-    <UsdArchivePath>$(ProjectDir)..\_tmp\usd-26.11.1.7z</UsdArchivePath>
-    <UsdInstallPath>$(ProjectDir)..\externals\usd</UsdInstallPath>
+    <UsdArchivePath>$(ProjectDir)..\..\_tmp\usd-26.11.1.7z</UsdArchivePath>
+    <UsdInstallPath>$(ProjectDir)..\..\externals\usd</UsdInstallPath>
   </PropertyGroup>
   <PropertyGroup>
     <OutDir>$(SolutionDir)_bin\$(Platform)_$(Configuration)_$(ProjectName)\</OutDir>
