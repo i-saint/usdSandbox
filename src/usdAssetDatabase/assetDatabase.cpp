@@ -13,8 +13,11 @@
 #pragma warning(pop)
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -284,6 +287,721 @@ bool ScanDirectoryRecursive(
     return true;
 }
 
+std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
+{
+    std::error_code ec;
+    std::filesystem::path norm = std::filesystem::weakly_canonical(path, ec);
+    if (ec)
+        norm = path.lexically_normal();
+
+#ifdef _WIN32
+    std::wstring wide = norm.native();
+    for (wchar_t& ch : wide) {
+        if (ch == L'/')
+            ch = L'\\';
+    }
+    if (!wide.empty())
+        ::CharLowerBuffW(wide.data(), static_cast<DWORD>(wide.size()));
+    return wide;
+#else
+    return norm.wstring();
+#endif
+}
+
+bool IsScreenshotNewerThanSource(
+    const std::filesystem::path& sourcePath,
+    const std::filesystem::path& screenshotPath)
+{
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(sourcePath, ec) || ec)
+        return true;
+    const auto sourceWriteTime = std::filesystem::last_write_time(sourcePath, ec);
+    if (ec)
+        return false;
+
+    if (!std::filesystem::is_regular_file(screenshotPath, ec) || ec)
+        return false;
+    if (std::filesystem::file_size(screenshotPath, ec) == 0 || ec)
+        return false;
+    const auto screenshotWriteTime = std::filesystem::last_write_time(screenshotPath, ec);
+    if (ec)
+        return false;
+
+    return screenshotWriteTime > sourceWriteTime;
+}
+
+#ifdef _WIN32
+constexpr std::string_view kWorkerPrefixReady = "@@READY";
+constexpr std::string_view kWorkerPrefixOk = "@@OK";
+constexpr std::string_view kWorkerPrefixErr = "@@ERR";
+constexpr std::string_view kWorkerCommandQuit = "@@QUIT";
+
+std::string SanitizeSingleLine(std::string text)
+{
+    for (char& ch : text) {
+        if (ch == '\r' || ch == '\n' || ch == '\t')
+            ch = ' ';
+    }
+    return text;
+}
+
+std::wstring QuoteWin32Arg(std::wstring_view arg)
+{
+    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring_view::npos)
+        return std::wstring(arg);
+
+    std::wstring quoted = L"\"";
+    for (auto it = arg.begin();; ++it) {
+        size_t backslashes = 0;
+        while (it != arg.end() && *it == L'\\') {
+            ++it;
+            ++backslashes;
+        }
+        if (it == arg.end()) {
+            quoted.append(backslashes * 2, L'\\');
+            break;
+        }
+        if (*it == L'"') {
+            quoted.append(backslashes * 2 + 1, L'\\');
+            quoted.push_back(L'"');
+        }
+        else {
+            quoted.append(backslashes, L'\\');
+            quoted.push_back(*it);
+        }
+    }
+    quoted.push_back(L'"');
+    return quoted;
+}
+
+std::filesystem::path ResolveScreenshotExecutablePath()
+{
+    const std::filesystem::path dllDir = GetCurrentDllDirectory();
+    if (!dllDir.empty()) {
+        const std::filesystem::path candidate = dllDir / L"usdScreenshot.exe";
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec)
+            return candidate;
+    }
+
+    const std::filesystem::path exeDir = GetModuleDirectory(nullptr);
+    if (!exeDir.empty() && exeDir != dllDir) {
+        const std::filesystem::path candidate = exeDir / L"usdScreenshot.exe";
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec)
+            return candidate;
+    }
+
+    return {};
+}
+
+class ScopedJobObject
+{
+public:
+    ScopedJobObject()
+    {
+        m_job = ::CreateJobObjectW(nullptr, nullptr);
+        if (m_job) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            ::SetInformationJobObject(m_job, JobObjectExtendedLimitInformation, &info, sizeof(info));
+        }
+    }
+
+    ~ScopedJobObject()
+    {
+        if (m_job)
+            ::CloseHandle(m_job);
+    }
+
+    ScopedJobObject(const ScopedJobObject&) = delete;
+    ScopedJobObject& operator=(const ScopedJobObject&) = delete;
+
+    void Assign(HANDLE process) const
+    {
+        if (m_job && process)
+            ::AssignProcessToJobObject(m_job, process);
+    }
+
+private:
+    HANDLE m_job = nullptr;
+};
+
+class ScreenshotWorkerClient
+{
+public:
+    ScreenshotWorkerClient() = default;
+
+    ~ScreenshotWorkerClient()
+    {
+        Shutdown(true);
+    }
+
+    ScreenshotWorkerClient(const ScreenshotWorkerClient&) = delete;
+    ScreenshotWorkerClient& operator=(const ScreenshotWorkerClient&) = delete;
+
+    bool Start(
+        const std::wstring& commandLine,
+        const std::filesystem::path& workingDirectory,
+        const ScopedJobObject& jobObject,
+        std::mutex& spawnMutex)
+    {
+        Shutdown(true);
+
+        HANDLE stdinRead = nullptr;
+        HANDLE stdinWrite = nullptr;
+        HANDLE stdoutRead = nullptr;
+        HANDLE stdoutWrite = nullptr;
+        HANDLE stderrHandle = nullptr;
+        bool closeStderrHandle = false;
+
+        {
+            std::lock_guard<std::mutex> lock(spawnMutex);
+
+            SECURITY_ATTRIBUTES saInherit{};
+            saInherit.nLength = sizeof(saInherit);
+            saInherit.bInheritHandle = TRUE;
+
+            if (!::CreatePipe(&stdinRead, &stdinWrite, &saInherit, 0))
+                return false;
+            ::SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0);
+
+            if (!::CreatePipe(&stdoutRead, &stdoutWrite, &saInherit, 0)) {
+                ::CloseHandle(stdinRead);
+                ::CloseHandle(stdinWrite);
+                return false;
+            }
+            ::SetHandleInformation(stdoutRead, HANDLE_FLAG_INHERIT, 0);
+
+            stderrHandle = ::CreateFileW(
+                L"NUL",
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &saInherit,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+            if (stderrHandle != INVALID_HANDLE_VALUE)
+                closeStderrHandle = true;
+            else
+                stderrHandle = nullptr;
+
+            HANDLE inheritedHandles[3] = { stdinRead, stdoutWrite, stderrHandle };
+            DWORD inheritedCount = stderrHandle ? 3 : 2;
+            if (inheritedCount == 3 &&
+                (inheritedHandles[2] == inheritedHandles[0] || inheritedHandles[2] == inheritedHandles[1])) {
+                inheritedCount = 2;
+            }
+
+            SIZE_T attrListSize = 0;
+            ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attrListSize);
+            std::vector<unsigned char> attrListBuffer(attrListSize);
+            auto* attrList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrListBuffer.data());
+
+            if (!::InitializeProcThreadAttributeList(attrList, 1, 0, &attrListSize) ||
+                !::UpdateProcThreadAttribute(
+                    attrList,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                    inheritedHandles,
+                    inheritedCount * sizeof(HANDLE),
+                    nullptr,
+                    nullptr)) {
+                if (attrList)
+                    ::DeleteProcThreadAttributeList(attrList);
+                ::CloseHandle(stdinRead);
+                ::CloseHandle(stdinWrite);
+                ::CloseHandle(stdoutRead);
+                ::CloseHandle(stdoutWrite);
+                if (closeStderrHandle && stderrHandle)
+                    ::CloseHandle(stderrHandle);
+                return false;
+            }
+
+            STARTUPINFOEXW si{};
+            si.StartupInfo.cb = sizeof(si);
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = stdinRead;
+            si.StartupInfo.hStdOutput = stdoutWrite;
+            si.StartupInfo.hStdError = stderrHandle;
+            si.lpAttributeList = attrList;
+
+            std::wstring mutableCmd = commandLine;
+            const LPCWSTR workDirPtr = workingDirectory.empty() ? nullptr : workingDirectory.c_str();
+            PROCESS_INFORMATION pi{};
+            const BOOL created = ::CreateProcessW(
+                nullptr,
+                mutableCmd.data(),
+                nullptr,
+                nullptr,
+                TRUE,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
+                nullptr,
+                workDirPtr,
+                &si.StartupInfo,
+                &pi);
+
+            ::DeleteProcThreadAttributeList(attrList);
+            ::CloseHandle(stdinRead);
+            ::CloseHandle(stdoutWrite);
+            if (closeStderrHandle && stderrHandle)
+                ::CloseHandle(stderrHandle);
+
+            if (!created) {
+                ::CloseHandle(stdinWrite);
+                ::CloseHandle(stdoutRead);
+                return false;
+            }
+
+            jobObject.Assign(pi.hProcess);
+            ::CloseHandle(pi.hThread);
+
+            {
+                std::lock_guard<std::mutex> procLock(m_procMutex);
+                m_process = pi.hProcess;
+            }
+            m_stdinWrite = stdinWrite;
+            m_stdoutRead = stdoutRead;
+            m_readBuffer.clear();
+        }
+
+        std::string line;
+        while (ReadLine(&line)) {
+            if (line == kWorkerPrefixReady)
+                return true;
+            if (line.starts_with(kWorkerPrefixErr)) {
+                Shutdown(true);
+                return false;
+            }
+        }
+
+        Shutdown(true);
+        return false;
+    }
+
+    bool ExecuteTask(
+        const std::string& sourcePathUtf8,
+        const std::string& outputPathUtf8,
+        bool* outWorkerCrashed)
+    {
+        if (outWorkerCrashed)
+            *outWorkerCrashed = false;
+
+        std::string payload = SanitizeSingleLine(sourcePathUtf8);
+        payload.push_back('\t');
+        payload += SanitizeSingleLine(outputPathUtf8);
+        payload.push_back('\n');
+
+        if (!WriteAll(payload)) {
+            if (outWorkerCrashed)
+                *outWorkerCrashed = true;
+            return false;
+        }
+
+        std::string line;
+        while (ReadLine(&line)) {
+            if (line == kWorkerPrefixOk)
+                return true;
+            if (line.starts_with(kWorkerPrefixErr))
+                return false;
+        }
+
+        if (outWorkerCrashed)
+            *outWorkerCrashed = true;
+        return false;
+    }
+
+    bool IsRunning() const
+    {
+        std::lock_guard<std::mutex> procLock(m_procMutex);
+        return m_process != nullptr && m_stdinWrite != nullptr && m_stdoutRead != nullptr;
+    }
+
+    void TerminateChildProcess()
+    {
+        std::lock_guard<std::mutex> procLock(m_procMutex);
+        if (m_process)
+            ::TerminateProcess(m_process, 1);
+    }
+
+    void Shutdown(bool forceTerminateIfAlive)
+    {
+        if (m_stdinWrite) {
+            if (!forceTerminateIfAlive) {
+                const std::string quitCmd = std::string(kWorkerCommandQuit) + "\n";
+                WriteAll(quitCmd);
+            }
+            ::CloseHandle(m_stdinWrite);
+            m_stdinWrite = nullptr;
+        }
+
+        if (m_stdoutRead) {
+            ::CloseHandle(m_stdoutRead);
+            m_stdoutRead = nullptr;
+        }
+
+        HANDLE processToClose = nullptr;
+        {
+            std::lock_guard<std::mutex> procLock(m_procMutex);
+            processToClose = m_process;
+            m_process = nullptr;
+        }
+
+        if (processToClose) {
+            const DWORD waitMs = forceTerminateIfAlive ? 100 : 2000;
+            if (::WaitForSingleObject(processToClose, waitMs) != WAIT_OBJECT_0)
+                ::TerminateProcess(processToClose, 1);
+            ::CloseHandle(processToClose);
+        }
+
+        m_readBuffer.clear();
+    }
+
+private:
+    bool WriteAll(std::string_view data) const
+    {
+        if (!m_stdinWrite)
+            return false;
+        size_t offset = 0;
+        while (offset < data.size()) {
+            const DWORD chunk = static_cast<DWORD>(std::min<size_t>(data.size() - offset, 64 * 1024));
+            DWORD written = 0;
+            if (!::WriteFile(m_stdinWrite, data.data() + offset, chunk, &written, nullptr) || written == 0)
+                return false;
+            offset += written;
+        }
+        return true;
+    }
+
+    bool ReadLine(std::string* outLine)
+    {
+        if (!m_stdoutRead)
+            return false;
+
+        for (;;) {
+            const size_t newlinePos = m_readBuffer.find('\n');
+            if (newlinePos != std::string::npos) {
+                std::string line = m_readBuffer.substr(0, newlinePos);
+                m_readBuffer.erase(0, newlinePos + 1);
+                if (!line.empty() && line.back() == '\r')
+                    line.pop_back();
+                *outLine = std::move(line);
+                return true;
+            }
+
+            char chunk[4096];
+            DWORD bytesRead = 0;
+            if (!::ReadFile(m_stdoutRead, chunk, sizeof(chunk), &bytesRead, nullptr) || bytesRead == 0) {
+                if (!m_readBuffer.empty()) {
+                    std::string line = std::move(m_readBuffer);
+                    m_readBuffer.clear();
+                    if (!line.empty() && line.back() == '\r')
+                        line.pop_back();
+                    *outLine = std::move(line);
+                    return true;
+                }
+                return false;
+            }
+            m_readBuffer.append(chunk, bytesRead);
+        }
+    }
+
+    mutable std::mutex m_procMutex;
+    HANDLE m_process = nullptr;
+    HANDLE m_stdinWrite = nullptr;
+    HANDLE m_stdoutRead = nullptr;
+    std::string m_readBuffer;
+};
+#endif // _WIN32
+
+class ScreenshotWorkerPool
+{
+public:
+    static constexpr size_t kWorkerCount = 4;
+    static constexpr size_t kImageWidth = 512;
+
+    ScreenshotWorkerPool() = default;
+
+    ~ScreenshotWorkerPool()
+    {
+        Stop();
+    }
+
+    ScreenshotWorkerPool(const ScreenshotWorkerPool&) = delete;
+    ScreenshotWorkerPool& operator=(const ScreenshotWorkerPool&) = delete;
+
+    void Start()
+    {
+#ifdef _WIN32
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_started)
+            return;
+
+        m_stopping = false;
+        m_workerExePath = ResolveScreenshotExecutablePath();
+        m_workerWorkDir = m_workerExePath.empty() ? std::filesystem::path() : m_workerExePath.parent_path();
+
+        if (!m_workerExePath.empty()) {
+            const unsigned int hwThreads = std::max(1u, std::thread::hardware_concurrency());
+            const unsigned int threadsPerWorker =
+                std::max(1u, hwThreads / static_cast<unsigned int>(kWorkerCount));
+            m_workerCommandLine = QuoteWin32Arg(m_workerExePath.native()) +
+                                  L" --worker --imageWidth " + std::to_wstring(kImageWidth) +
+                                  L" --threadsPerWorker " + std::to_wstring(threadsPerWorker);
+        }
+        else {
+            m_workerCommandLine.clear();
+        }
+
+        m_started = true;
+        for (size_t i = 0; i < kWorkerCount; ++i) {
+            m_slots[i].disabled = m_workerCommandLine.empty();
+            m_slots[i].busy.store(false);
+            m_slots[i].thread = std::thread([this, i]() { WorkerLoop(i); });
+        }
+#endif
+    }
+
+    void Stop()
+    {
+#ifdef _WIN32
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_started)
+                return;
+
+            m_stopping = true;
+            for (const Task& pending : m_queue)
+                m_activeKeys.erase(pending.key);
+            m_queue.clear();
+        }
+
+        m_queueCv.notify_all();
+        m_completionCv.notify_all();
+
+        for (size_t i = 0; i < kWorkerCount; ++i) {
+            if (m_slots[i].busy.load())
+                m_slots[i].client.TerminateChildProcess();
+        }
+
+        for (size_t i = 0; i < kWorkerCount; ++i) {
+            if (m_slots[i].thread.joinable())
+                m_slots[i].thread.join();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_activeKeys.clear();
+            m_started = false;
+            m_stopping = false;
+        }
+        m_completionCv.notify_all();
+#endif
+    }
+
+    void EnqueueDirectoryFiles(
+        const std::filesystem::path& directoryPath,
+        const std::vector<std::string>& fileNames)
+    {
+#ifdef _WIN32
+        if (fileNames.empty())
+            return;
+
+        Start();
+
+        std::vector<Task> candidates;
+        candidates.reserve(fileNames.size());
+
+        for (const std::string& fileName : fileNames) {
+            const std::filesystem::path srcPath = directoryPath / PathFromUtf8(fileName);
+            std::filesystem::path jpgPath = srcPath;
+            jpgPath += L".jpg";
+
+            if (IsScreenshotNewerThanSource(srcPath, jpgPath))
+                continue;
+
+            candidates.push_back(Task{
+                srcPath,
+                jpgPath,
+                MakeNormalizedPathKey(jpgPath),
+            });
+        }
+
+        if (candidates.empty())
+            return;
+
+        size_t enqueued = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_started || m_stopping)
+                return;
+
+            for (Task& task : candidates) {
+                if (m_activeKeys.contains(task.key))
+                    continue;
+                m_activeKeys.insert(task.key);
+                m_queue.push_back(std::move(task));
+                ++enqueued;
+            }
+        }
+
+        if (enqueued > 0)
+            m_queueCv.notify_all();
+#else
+        (void)directoryPath;
+        (void)fileNames;
+#endif
+    }
+
+    void WaitForPendingScreenshot(const std::filesystem::path& screenshotPath)
+    {
+#ifdef _WIN32
+        const std::wstring key = MakeNormalizedPathKey(screenshotPath);
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (!m_activeKeys.contains(key))
+            return;
+
+        for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
+            if (it->key == key) {
+                if (it != m_queue.begin()) {
+                    Task promoted = std::move(*it);
+                    m_queue.erase(it);
+                    m_queue.push_front(std::move(promoted));
+                }
+                break;
+            }
+        }
+
+        m_completionCv.wait(lock, [this, &key]() {
+            return m_stopping || !m_activeKeys.contains(key);
+        });
+#else
+        (void)screenshotPath;
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    struct Task
+    {
+        std::filesystem::path sourcePath;
+        std::filesystem::path screenshotPath;
+        std::wstring key;
+    };
+
+    struct WorkerSlot
+    {
+        ScreenshotWorkerClient client;
+        std::thread thread;
+        std::atomic<bool> busy{ false };
+        bool disabled = false;
+    };
+
+    void EnsureWorkerProcessStarted(WorkerSlot& slot)
+    {
+        if (slot.disabled || slot.client.IsRunning() || m_stopping)
+            return;
+
+        slot.busy.store(true);
+        const bool started = slot.client.Start(
+            m_workerCommandLine, m_workerWorkDir, m_jobObject, m_spawnMutex);
+        slot.busy.store(false);
+
+        if (!started && !m_stopping)
+            slot.disabled = true;
+    }
+
+    void WorkerLoop(size_t workerIndex)
+    {
+        WorkerSlot& slot = m_slots[workerIndex];
+        EnsureWorkerProcessStarted(slot);
+
+        for (;;) {
+            Task task;
+            {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                m_queueCv.wait(lock, [this]() {
+                    return m_stopping || !m_queue.empty();
+                });
+
+                if (m_stopping)
+                    break;
+
+                task = std::move(m_queue.front());
+                m_queue.pop_front();
+            }
+
+            ExecuteScreenshotTask(workerIndex, slot, task);
+
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_activeKeys.erase(task.key);
+            }
+            m_completionCv.notify_all();
+        }
+
+        slot.client.Shutdown(m_stopping && slot.busy.load());
+    }
+
+    void ExecuteScreenshotTask(size_t workerIndex, WorkerSlot& slot, const Task& task)
+    {
+        if (m_stopping || IsScreenshotNewerThanSource(task.sourcePath, task.screenshotPath))
+            return;
+
+        EnsureWorkerProcessStarted(slot);
+        if (!slot.client.IsRunning())
+            return;
+
+        std::filesystem::path tempPath = task.screenshotPath;
+        tempPath += L".tmp." + std::to_wstring(::GetCurrentProcessId()) + L"_" +
+                    std::to_wstring(workerIndex) + L".jpg";
+
+        bool workerCrashed = false;
+        slot.busy.store(true);
+        const bool ok = slot.client.ExecuteTask(
+            PathToUtf8(task.sourcePath),
+            PathToUtf8(tempPath),
+            &workerCrashed);
+        slot.busy.store(false);
+
+        if (ok) {
+            if (!::MoveFileExW(
+                    tempPath.c_str(),
+                    task.screenshotPath.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                ::Sleep(15);
+                if (!::MoveFileExW(
+                        tempPath.c_str(),
+                        task.screenshotPath.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                    ::DeleteFileW(tempPath.c_str());
+                }
+            }
+        }
+        else {
+            ::DeleteFileW(tempPath.c_str());
+            if (workerCrashed)
+                slot.client.Shutdown(true);
+        }
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_queueCv;
+    std::condition_variable m_completionCv;
+    std::deque<Task> m_queue;
+    std::unordered_set<std::wstring> m_activeKeys;
+    bool m_started = false;
+    std::atomic<bool> m_stopping{ false };
+
+    ScopedJobObject m_jobObject;
+    std::mutex m_spawnMutex;
+    std::filesystem::path m_workerExePath;
+    std::filesystem::path m_workerWorkDir;
+    std::wstring m_workerCommandLine;
+    std::array<WorkerSlot, kWorkerCount> m_slots;
+#endif
+};
+
 class AssetDatabase final : public IAssetDatabase
 {
 public:
@@ -368,6 +1086,8 @@ public:
         if (!BindServerLocked(host, port, svr))
             return false;
 
+        m_screenshotPool.Start();
+
         m_server = std::move(svr);
         httplib::Server* rawServer = m_server.get();
         m_running.store(true);
@@ -389,12 +1109,16 @@ public:
             if (!BindServerLocked(host, port, svr))
                 return false;
 
+            m_screenshotPool.Start();
+
             m_server = std::move(svr);
             rawServer = m_server.get();
             m_running.store(true);
         }
 
         const bool ok = rawServer->listen_after_bind();
+
+        m_screenshotPool.Stop();
 
         {
             std::lock_guard lock(m_serverMutex);
@@ -415,6 +1139,8 @@ public:
             if (m_serverThread.joinable() && m_serverThread.get_id() != std::this_thread::get_id())
                 threadToJoin = std::move(m_serverThread);
         }
+
+        m_screenshotPool.Stop();
 
         if (threadToJoin.joinable())
             threadToJoin.join();
@@ -479,6 +1205,13 @@ private:
                 return;
             }
 
+            const std::filesystem::path rootDir = GetRootDirectory();
+            if (!rootDir.empty() && !contents->files.empty()) {
+                const std::filesystem::path dirDiskPath =
+                    normalized->empty() ? rootDir : (rootDir / PathFromUtf8(*normalized));
+                m_screenshotPool.EnqueueDirectoryFiles(dirDiskPath, contents->files);
+            }
+
             nlohmann::json body = {
                 { "dir", *normalized },
                 { "directories", contents->directories },
@@ -517,6 +1250,9 @@ private:
                 }
                 targetPath /= "index.html";
             }
+
+            if (ToLowerAscii(PathToUtf8(targetPath.extension())) == ".jpg")
+                m_screenshotPool.WaitForPendingScreenshot(targetPath);
 
             ec.clear();
             if (!std::filesystem::is_regular_file(targetPath, ec) || ec) {
@@ -589,6 +1325,7 @@ private:
     std::thread m_serverThread;
     std::atomic<int> m_boundPort{ 0 };
     std::atomic<bool> m_running{ false };
+    ScreenshotWorkerPool m_screenshotPool;
 };
 
 } // namespace

@@ -106,6 +106,10 @@
       <Project>{9B9E8926-2BA4-46F2-94F3-EBB3C2867A24}</Project>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
+    <ProjectReference Include="..\usdScreenshot\usdScreenshot.vcxproj">
+      <Project>{8D2B74E1-4F65-4C9A-A1C2-3890F5D2B710}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <Target Name="CopyUsdRuntime" AfterTargets="Build" Condition="Exists('$(UsdSdkRoot)\lib\usd_ms.dll')">
     <ItemGroup>
