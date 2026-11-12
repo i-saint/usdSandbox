@@ -1,5 +1,5 @@
-<script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+﻿<script setup lang="ts">
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import ProgressSpinner from 'primevue/progressspinner'
 import Tag from 'primevue/tag'
 
@@ -9,14 +9,27 @@ const props = defineProps<{
   cardWidth: number
 }>()
 
+const imgRef = ref<HTMLImageElement | null>(null)
 const imageState = ref<'loading' | 'loaded' | 'error'>('loading')
+
+function checkAlreadyLoaded() {
+  const el = imgRef.value
+  if (el && el.complete && el.naturalWidth > 0) {
+    imageState.value = 'loaded'
+  }
+}
 
 watch(
   () => props.screenshotUrl,
   () => {
     imageState.value = 'loading'
+    void nextTick(checkAlreadyLoaded)
   },
 )
+
+onMounted(() => {
+  checkAlreadyLoaded()
+})
 
 const extensionLabel = computed(() => {
   const dotIdx = props.fileName.lastIndexOf('.')
@@ -42,7 +55,19 @@ function onError() {
 <template>
   <div class="asset-card" :style="{ width: `${cardWidth}px` }" :title="fileName">
     <div class="thumb-box" :style="{ height: `${Math.round(cardWidth * 0.75)}px` }">
-      <div v-if="imageState === 'loading'" class="thumb-placeholder">
+      <img
+        v-if="imageState !== 'error'"
+        ref="imgRef"
+        :src="screenshotUrl"
+        :alt="fileName"
+        class="thumb-img"
+        :class="{ 'is-loading': imageState === 'loading' }"
+        loading="lazy"
+        @load="onLoad"
+        @error="onError"
+      />
+
+      <div v-if="imageState === 'loading'" class="thumb-overlay">
         <ProgressSpinner
           style="width: 28px; height: 28px"
           strokeWidth="4"
@@ -54,16 +79,6 @@ function onError() {
         <i class="pi pi-box" style="font-size: 2rem" />
         <span>No Preview</span>
       </div>
-
-      <img
-        v-show="imageState === 'loaded'"
-        :src="screenshotUrl"
-        :alt="fileName"
-        class="thumb-img"
-        loading="lazy"
-        @load="onLoad"
-        @error="onError"
-      />
 
       <Tag :value="extensionLabel" :severity="tagSeverity" class="ext-badge" />
     </div>
@@ -107,6 +122,20 @@ function onError() {
   height: 100%;
   object-fit: contain;
   display: block;
+  transition: opacity 0.12s ease;
+}
+
+.thumb-img.is-loading {
+  opacity: 0;
+}
+
+.thumb-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .thumb-placeholder {
