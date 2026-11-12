@@ -5,8 +5,11 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#define __TBB_NO_IMPLICIT_LINKAGE 1
 #pragma warning(push, 0)
 #pragma warning(disable: 4244 4273 4305 4996)
+#include <oneapi/tbb/concurrent_vector.h>
+#include <oneapi/tbb/task_group.h>
 #include <pxr/pxr.h>
 #include <pxr/base/plug/registry.h>
 #include <pxr/usd/sdf/fileFormat.h>
@@ -17,6 +20,7 @@
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -225,66 +229,6 @@ std::optional<std::string> NormalizeRelativeDir(std::string_view rawDir)
     }
 
     return normalized;
-}
-
-bool ScanDirectoryRecursive(
-    const std::filesystem::path& currentDir,
-    const std::string& relativeDirUtf8,
-    const std::unordered_set<std::string>& supportedExtensions,
-    std::map<std::string, IAssetDatabase::DirectoryContents>& outDirectories)
-{
-    std::error_code ec;
-    std::filesystem::directory_iterator iter(
-        currentDir, std::filesystem::directory_options::skip_permission_denied, ec);
-    if (ec)
-        return false;
-
-    std::vector<std::pair<std::string, std::filesystem::path>> childDirs;
-    std::vector<std::string> matchedFiles;
-
-    for (const std::filesystem::directory_entry& entry : iter) {
-        std::error_code entryEc;
-        if (entry.is_symlink(entryEc)) {
-            if (entry.is_directory(entryEc))
-                continue;
-        }
-
-        const std::filesystem::path entryPath = entry.path();
-        const std::string entryNameUtf8 = PathToUtf8(entryPath.filename());
-        if (entryNameUtf8.empty())
-            continue;
-
-        if (entry.is_directory(entryEc) && !entryEc) {
-            childDirs.emplace_back(entryNameUtf8, entryPath);
-        }
-        else if (entry.is_regular_file(entryEc) && !entryEc) {
-            if (IsSupportedAssetFile(entryPath, entryNameUtf8, supportedExtensions))
-                matchedFiles.push_back(entryNameUtf8);
-        }
-    }
-
-    std::sort(childDirs.begin(), childDirs.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.first < rhs.first;
-    });
-    std::sort(matchedFiles.begin(), matchedFiles.end());
-
-    std::vector<std::string> keptChildDirs;
-    keptChildDirs.reserve(childDirs.size());
-
-    for (const auto& [childName, childPath] : childDirs) {
-        const std::string childRelative =
-            relativeDirUtf8.empty() ? childName : (relativeDirUtf8 + "/" + childName);
-        if (ScanDirectoryRecursive(childPath, childRelative, supportedExtensions, outDirectories))
-            keptChildDirs.push_back(childName);
-    }
-
-    if (matchedFiles.empty() && keptChildDirs.empty())
-        return false;
-
-    outDirectories.emplace(
-        relativeDirUtf8,
-        IAssetDatabase::DirectoryContents{ std::move(keptChildDirs), std::move(matchedFiles) });
-    return true;
 }
 
 std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
@@ -722,7 +666,7 @@ public:
 
     ScreenshotWorkerPool() = default;
 
-    ~ScreenshotWorkerPool()
+    ~ScreenshotWorkerPool() noexcept
     {
         Stop();
     }
@@ -733,31 +677,44 @@ public:
     void Start()
     {
 #ifdef _WIN32
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_started)
-            return;
+        std::lock_guard<std::mutex> lifecycleLock(m_lifecycleMutex);
 
-        m_stopping = false;
-        m_workerExePath = ResolveScreenshotExecutablePath();
-        m_workerWorkDir = m_workerExePath.empty() ? std::filesystem::path() : m_workerExePath.parent_path();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_started)
+                return;
 
-        if (!m_workerExePath.empty()) {
-            const unsigned int hwThreads = std::max(1u, std::thread::hardware_concurrency());
-            const unsigned int threadsPerWorker =
-                std::max(1u, hwThreads / static_cast<unsigned int>(kWorkerCount));
-            m_workerCommandLine = QuoteWin32Arg(m_workerExePath.native()) +
-                                  L" --worker --imageWidth " + std::to_wstring(kImageWidth) +
-                                  L" --threadsPerWorker " + std::to_wstring(threadsPerWorker);
+            m_stopping = false;
+            m_workerExePath = ResolveScreenshotExecutablePath();
+            m_workerWorkDir = m_workerExePath.empty() ? std::filesystem::path() : m_workerExePath.parent_path();
+
+            if (!m_workerExePath.empty()) {
+                const unsigned int hwThreads = std::max(1u, std::thread::hardware_concurrency());
+                const unsigned int threadsPerWorker =
+                    std::max(1u, hwThreads / static_cast<unsigned int>(kWorkerCount));
+                m_workerCommandLine = QuoteWin32Arg(m_workerExePath.native()) +
+                                      L" --worker --imageWidth " + std::to_wstring(kImageWidth) +
+                                      L" --threadsPerWorker " + std::to_wstring(threadsPerWorker);
+            }
+            else {
+                m_workerCommandLine.clear();
+            }
+
+            for (size_t i = 0; i < kWorkerCount; ++i) {
+                m_slots[i].disabled = m_workerCommandLine.empty();
+                m_slots[i].busy.store(false);
+                m_slots[i].scheduled = false;
+            }
         }
-        else {
-            m_workerCommandLine.clear();
+
+        if (!m_workerCommandLine.empty()) {
+            for (size_t i = 0; i < kWorkerCount; ++i)
+                EnsureWorkerProcessStarted(m_slots[i]);
         }
 
-        m_started = true;
-        for (size_t i = 0; i < kWorkerCount; ++i) {
-            m_slots[i].disabled = m_workerCommandLine.empty();
-            m_slots[i].busy.store(false);
-            m_slots[i].thread = std::thread([this, i]() { WorkerLoop(i); });
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_started = true;
         }
 #endif
     }
@@ -765,6 +722,8 @@ public:
     void Stop()
     {
 #ifdef _WIN32
+        std::lock_guard<std::mutex> lifecycleLock(m_lifecycleMutex);
+
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (!m_started)
@@ -776,7 +735,6 @@ public:
             m_queue.clear();
         }
 
-        m_queueCv.notify_all();
         m_completionCv.notify_all();
 
         for (size_t i = 0; i < kWorkerCount; ++i) {
@@ -784,14 +742,16 @@ public:
                 m_slots[i].client.TerminateChildProcess();
         }
 
-        for (size_t i = 0; i < kWorkerCount; ++i) {
-            if (m_slots[i].thread.joinable())
-                m_slots[i].thread.join();
-        }
+        m_taskGroup.wait();
+
+        for (size_t i = 0; i < kWorkerCount; ++i)
+            m_slots[i].client.Shutdown(false);
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_activeKeys.clear();
+            for (size_t i = 0; i < kWorkerCount; ++i)
+                m_slots[i].scheduled = false;
             m_started = false;
             m_stopping = false;
         }
@@ -830,10 +790,19 @@ public:
         if (candidates.empty())
             return;
 
-        size_t enqueued = 0;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (!m_started || m_stopping)
+                return;
+
+            bool anyWorkerUsable = false;
+            for (size_t i = 0; i < kWorkerCount; ++i) {
+                if (!m_slots[i].disabled) {
+                    anyWorkerUsable = true;
+                    break;
+                }
+            }
+            if (!anyWorkerUsable)
                 return;
 
             for (Task& task : candidates) {
@@ -841,12 +810,19 @@ public:
                     continue;
                 m_activeKeys.insert(task.key);
                 m_queue.push_back(std::move(task));
-                ++enqueued;
+            }
+
+            size_t pendingTasks = m_queue.size();
+            for (size_t i = 0; i < kWorkerCount && pendingTasks > 0; ++i) {
+                if (!m_slots[i].disabled && !m_slots[i].scheduled) {
+                    m_slots[i].scheduled = true;
+                    --pendingTasks;
+                    m_taskGroup.run([this, i]() {
+                        DrainQueueWithWorker(i);
+                    });
+                }
             }
         }
-
-        if (enqueued > 0)
-            m_queueCv.notify_all();
 #else
         (void)directoryPath;
         (void)fileNames;
@@ -892,8 +868,8 @@ private:
     struct WorkerSlot
     {
         ScreenshotWorkerClient client;
-        std::thread thread;
         std::atomic<bool> busy{ false };
+        bool scheduled = false;
         bool disabled = false;
     };
 
@@ -911,21 +887,18 @@ private:
             slot.disabled = true;
     }
 
-    void WorkerLoop(size_t workerIndex)
+    void DrainQueueWithWorker(size_t workerIndex)
     {
         WorkerSlot& slot = m_slots[workerIndex];
-        EnsureWorkerProcessStarted(slot);
 
         for (;;) {
             Task task;
             {
-                std::unique_lock<std::mutex> lock(m_mutex);
-                m_queueCv.wait(lock, [this]() {
-                    return m_stopping || !m_queue.empty();
-                });
-
-                if (m_stopping)
-                    break;
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_stopping || m_queue.empty()) {
+                    slot.scheduled = false;
+                    return;
+                }
 
                 task = std::move(m_queue.front());
                 m_queue.pop_front();
@@ -939,8 +912,6 @@ private:
             }
             m_completionCv.notify_all();
         }
-
-        slot.client.Shutdown(m_stopping && slot.busy.load());
     }
 
     void ExecuteScreenshotTask(size_t workerIndex, WorkerSlot& slot, const Task& task)
@@ -985,14 +956,15 @@ private:
         }
     }
 
+    std::mutex m_lifecycleMutex;
     std::mutex m_mutex;
-    std::condition_variable m_queueCv;
     std::condition_variable m_completionCv;
     std::deque<Task> m_queue;
     std::unordered_set<std::wstring> m_activeKeys;
     bool m_started = false;
     std::atomic<bool> m_stopping{ false };
 
+    tbb::task_group m_taskGroup;
     ScopedJobObject m_jobObject;
     std::mutex m_spawnMutex;
     std::filesystem::path m_workerExePath;
@@ -1007,9 +979,10 @@ class AssetDatabase final : public IAssetDatabase
 public:
     AssetDatabase() = default;
 
-    ~AssetDatabase() override
+    ~AssetDatabase() noexcept override
     {
         StopServer();
+        m_scanTaskGroup.wait();
     }
 
     AssetDatabase(const AssetDatabase&) = delete;
@@ -1033,8 +1006,41 @@ public:
         }
 
         const std::unordered_set<std::string> supportedExtensions = CollectSupportedExtensions();
+        tbb::concurrent_vector<std::pair<std::string, std::vector<std::string>>> matchedDirFiles;
+
+        {
+            std::lock_guard<std::mutex> scanLock(m_scanMutex);
+            m_scanTaskGroup.run([this, &effectiveRoot, &supportedExtensions, &matchedDirFiles]() {
+                ScanDirectoryTask(effectiveRoot, "", supportedExtensions, matchedDirFiles);
+            });
+            m_scanTaskGroup.wait();
+        }
+
         std::map<std::string, DirectoryContents> scannedDirectories;
-        ScanDirectoryRecursive(effectiveRoot, "", supportedExtensions, scannedDirectories);
+        for (auto& [relDir, files] : matchedDirFiles) {
+            scannedDirectories[relDir].files = std::move(files);
+
+            std::string_view current = relDir;
+            while (!current.empty()) {
+                const size_t slashPos = current.rfind('/');
+                const std::string parentDir =
+                    (slashPos == std::string_view::npos) ? std::string() : std::string(current.substr(0, slashPos));
+                const std::string childName =
+                    (slashPos == std::string_view::npos) ? std::string(current) : std::string(current.substr(slashPos + 1));
+
+                scannedDirectories[parentDir].directories.push_back(std::move(childName));
+                if (slashPos == std::string_view::npos)
+                    break;
+                current = current.substr(0, slashPos);
+            }
+        }
+
+        for (auto& [_, contents] : scannedDirectories) {
+            std::sort(contents.directories.begin(), contents.directories.end());
+            contents.directories.erase(
+                std::unique(contents.directories.begin(), contents.directories.end()),
+                contents.directories.end());
+        }
 
         std::unique_lock lock(m_dataMutex);
         m_rootDirectory = effectiveRoot;
@@ -1315,6 +1321,58 @@ private:
         outServer = std::move(svr);
         return true;
     }
+
+    void ScanDirectoryTask(
+        const std::filesystem::path& currentDir,
+        const std::string& relativeDirUtf8,
+        const std::unordered_set<std::string>& supportedExtensions,
+        tbb::concurrent_vector<std::pair<std::string, std::vector<std::string>>>& outMatchedDirFiles)
+    {
+        std::error_code ec;
+        std::filesystem::directory_iterator iter(
+            currentDir, std::filesystem::directory_options::skip_permission_denied, ec);
+        if (ec)
+            return;
+
+        std::vector<std::string> matchedFiles;
+
+        for (const std::filesystem::directory_entry& entry : iter) {
+            std::error_code entryEc;
+            if (entry.is_symlink(entryEc)) {
+                if (entry.is_directory(entryEc))
+                    continue;
+            }
+
+            const std::filesystem::path entryPath = entry.path();
+            const std::string entryNameUtf8 = PathToUtf8(entryPath.filename());
+            if (entryNameUtf8.empty())
+                continue;
+
+            if (entry.is_directory(entryEc) && !entryEc) {
+                std::string childRelative =
+                    relativeDirUtf8.empty() ? entryNameUtf8 : (relativeDirUtf8 + "/" + entryNameUtf8);
+                m_scanTaskGroup.run([this,
+                                     entryPath,
+                                     childRel = std::move(childRelative),
+                                     &supportedExtensions,
+                                     &outMatchedDirFiles]() {
+                    ScanDirectoryTask(entryPath, childRel, supportedExtensions, outMatchedDirFiles);
+                });
+            }
+            else if (entry.is_regular_file(entryEc) && !entryEc) {
+                if (IsSupportedAssetFile(entryPath, entryNameUtf8, supportedExtensions))
+                    matchedFiles.push_back(entryNameUtf8);
+            }
+        }
+
+        if (!matchedFiles.empty()) {
+            std::sort(matchedFiles.begin(), matchedFiles.end());
+            outMatchedDirFiles.emplace_back(relativeDirUtf8, std::move(matchedFiles));
+        }
+    }
+
+    std::mutex m_scanMutex;
+    tbb::task_group m_scanTaskGroup;
 
     mutable std::shared_mutex m_dataMutex;
     std::filesystem::path m_rootDirectory;
