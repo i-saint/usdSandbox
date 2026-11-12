@@ -11,6 +11,7 @@ struct RenderOptions
 {
     size_t imageWidth = 512;
     size_t imageHeight = 512;
+    float backgroundColor[3] = { 0.3f, 0.3f, 0.3f };
     float complexity = 1.0f;
     std::string colorCorrectionMode = "sRGB";
     std::string rendererPlugin;
@@ -20,7 +21,7 @@ struct RenderOptions
     bool enableUsdDrawModes = true;
     bool cameraLightEnabled = true;
     bool domeLightVisibility = false;
-    std::vector<std::string> purposes = { "proxy" };
+    std::vector<std::string> purposes = { "render" };
     unsigned int threadsPerWorker = 0;
 };
 

@@ -22,6 +22,8 @@
 #include <pxr/base/work/threadLimits.h>
 #include <pxr/imaging/cameraUtil/conformWindow.h>
 #include <pxr/imaging/garch/glApi.h>
+#include <pxr/imaging/hio/image.h>
+#include <pxr/imaging/hio/types.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/resolverContext.h>
 #include <pxr/usd/sdf/layer.h>
@@ -37,10 +39,14 @@
 #pragma warning(pop)
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -207,6 +213,177 @@ static GfCamera ComputeAutoFrameCamera(
     return gfCamera;
 }
 
+static float SRGBToLinear(float s)
+{
+    s = std::clamp(s, 0.0f, 1.0f);
+    return (s <= 0.04045f) ? (s / 12.92f) : std::pow((s + 0.055f) / 1.055f, 2.4f);
+}
+
+static float LinearToSRGB(float l)
+{
+    l = std::clamp(l, 0.0f, 1.0f);
+    return (l <= 0.0031308f) ? (l * 12.92f) : (1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f);
+}
+
+static const std::array<float, 256>& GetSRGBToLinearLUT()
+{
+    static const std::array<float, 256> lut = [] {
+        std::array<float, 256> table{};
+        for (size_t i = 0; i < 256; ++i)
+            table[i] = SRGBToLinear(static_cast<float>(i) * (1.0f / 255.0f));
+        return table;
+    }();
+    return lut;
+}
+
+static std::string ToLowerAscii(std::string s)
+{
+    for (char& ch : s)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+static bool CompositeBackgroundAndWrite(
+    const std::string& recordedImagePath,
+    const std::string& outputImagePath,
+    const std::string& outputExtLower,
+    const float bgColor[3],
+    bool isSRGB)
+{
+    HioImageSharedPtr reader = HioImage::OpenForReading(
+        recordedImagePath, 0, 0, HioImage::SourceColorSpace::Raw);
+    if (!reader)
+        return false;
+
+    const int width = reader->GetWidth();
+    const int height = reader->GetHeight();
+    if (width <= 0 || height <= 0)
+        return false;
+
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+
+    if (outputExtLower == ".exr" || outputExtLower == ".hdr") {
+        std::vector<float> pixels(pixelCount * 4);
+        HioImage::StorageSpec readSpec;
+        readSpec.width = width;
+        readSpec.height = height;
+        readSpec.depth = 1;
+        readSpec.flipped = false;
+        readSpec.format = HioFormatFloat32Vec4;
+        readSpec.data = pixels.data();
+        if (!reader->Read(readSpec))
+            return false;
+
+        for (size_t i = 0; i < pixelCount; ++i) {
+            float* px = &pixels[i * 4];
+            const float invA = 1.0f - std::clamp(px[3], 0.0f, 1.0f);
+            px[0] += invA * bgColor[0];
+            px[1] += invA * bgColor[1];
+            px[2] += invA * bgColor[2];
+            px[3] = 1.0f;
+        }
+
+        HioImageSharedPtr writer = HioImage::OpenForWriting(outputImagePath);
+        if (!writer)
+            return false;
+
+        HioImage::StorageSpec writeSpec = readSpec;
+        return writer->Write(writeSpec);
+    }
+
+    std::vector<uint8_t> pixels(pixelCount * 4);
+    HioImage::StorageSpec readSpec;
+    readSpec.width = width;
+    readSpec.height = height;
+    readSpec.depth = 1;
+    readSpec.flipped = false;
+    readSpec.format = HioFormatUNorm8Vec4;
+    readSpec.data = pixels.data();
+    if (!reader->Read(readSpec))
+        return false;
+
+    const uint8_t bgByte[3] = {
+        static_cast<uint8_t>(std::lround(std::clamp(bgColor[0], 0.0f, 1.0f) * 255.0f)),
+        static_cast<uint8_t>(std::lround(std::clamp(bgColor[1], 0.0f, 1.0f) * 255.0f)),
+        static_cast<uint8_t>(std::lround(std::clamp(bgColor[2], 0.0f, 1.0f) * 255.0f)),
+    };
+
+    if (isSRGB) {
+        const auto& srgbToLinear = GetSRGBToLinearLUT();
+        const float bgLinear[3] = {
+            SRGBToLinear(bgColor[0]),
+            SRGBToLinear(bgColor[1]),
+            SRGBToLinear(bgColor[2]),
+        };
+
+        for (size_t i = 0; i < pixelCount; ++i) {
+            uint8_t* px = &pixels[i * 4];
+            const uint8_t a = px[3];
+            if (a == 255)
+                continue;
+            if (a == 0) {
+                px[0] = bgByte[0];
+                px[1] = bgByte[1];
+                px[2] = bgByte[2];
+                px[3] = 255;
+                continue;
+            }
+            const float invA = 1.0f - (static_cast<float>(a) * (1.0f / 255.0f));
+            for (int c = 0; c < 3; ++c) {
+                const float lin = srgbToLinear[px[c]] + invA * bgLinear[c];
+                px[c] = static_cast<uint8_t>(std::lround(LinearToSRGB(lin) * 255.0f));
+            }
+            px[3] = 255;
+        }
+    }
+    else {
+        for (size_t i = 0; i < pixelCount; ++i) {
+            uint8_t* px = &pixels[i * 4];
+            const uint8_t a = px[3];
+            if (a == 255)
+                continue;
+            if (a == 0) {
+                px[0] = bgByte[0];
+                px[1] = bgByte[1];
+                px[2] = bgByte[2];
+                px[3] = 255;
+                continue;
+            }
+            const float invA = 1.0f - (static_cast<float>(a) * (1.0f / 255.0f));
+            for (int c = 0; c < 3; ++c) {
+                const float v = std::clamp(
+                    (static_cast<float>(px[c]) * (1.0f / 255.0f)) + invA * bgColor[c], 0.0f, 1.0f);
+                px[c] = static_cast<uint8_t>(std::lround(v * 255.0f));
+            }
+            px[3] = 255;
+        }
+    }
+
+    HioImageSharedPtr writer = HioImage::OpenForWriting(outputImagePath);
+    if (!writer)
+        return false;
+
+    if (outputExtLower == ".jpg" || outputExtLower == ".jpeg" || outputExtLower == ".bmp") {
+        std::vector<uint8_t> rgb(pixelCount * 3);
+        for (size_t i = 0; i < pixelCount; ++i) {
+            rgb[i * 3 + 0] = pixels[i * 4 + 0];
+            rgb[i * 3 + 1] = pixels[i * 4 + 1];
+            rgb[i * 3 + 2] = pixels[i * 4 + 2];
+        }
+        HioImage::StorageSpec writeSpec;
+        writeSpec.width = width;
+        writeSpec.height = height;
+        writeSpec.depth = 1;
+        writeSpec.flipped = false;
+        writeSpec.format = HioFormatUNorm8Vec3;
+        writeSpec.data = rgb.data();
+        return writer->Write(writeSpec);
+    }
+
+    HioImage::StorageSpec writeSpec = readSpec;
+    return writer->Write(writeSpec);
+}
+
 bool ScreenshotRenderer::Initialize(const RenderOptions& options, std::string* errorMessage)
 {
     m_options = options;
@@ -340,10 +517,37 @@ bool ScreenshotRenderer::Render(
     recorder.SetDomeLightVisibility(m_options.domeLightVisibility);
     recorder.SetPrimaryCameraPrimPath(screenshotCamera.GetPath());
 
-    const bool recorded = recorder.Record(stage, screenshotCamera, timeCode, outputImagePath);
+    const std::string outputExtLower = ToLowerAscii(PathToUtf8(outFsPath.extension()));
+    const wchar_t* tempExt = (outputExtLower == ".exr" || outputExtLower == ".hdr") ? L".exr" : L".png";
+    const std::filesystem::path tempFsPath = outFsPath.parent_path() /
+        (outFsPath.stem().native() + L".__usdss_" + std::to_wstring(GetCurrentProcessId()) + tempExt);
+    const std::string tempImagePath = PathToUtf8(tempFsPath);
+
+    struct TempFileGuard
+    {
+        std::filesystem::path path;
+        ~TempFileGuard()
+        {
+            if (!path.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        }
+    } tempGuard{ tempFsPath };
+
+    const bool recorded = recorder.Record(stage, screenshotCamera, timeCode, tempImagePath);
     if (!recorded) {
         if (errorMessage)
             *errorMessage = CollectErrors(errorMark, "Failed to record screenshot: " + usdFilePath);
+        errorMark.Clear();
+        return false;
+    }
+
+    const bool isSRGB = (m_options.colorCorrectionMode == "sRGB");
+    if (!CompositeBackgroundAndWrite(
+            tempImagePath, outputImagePath, outputExtLower, m_options.backgroundColor, isSRGB)) {
+        if (errorMessage)
+            *errorMessage = CollectErrors(errorMark, "Failed to composite background: " + outputImagePath);
         errorMark.Clear();
         return false;
     }
