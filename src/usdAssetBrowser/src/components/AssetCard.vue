@@ -54,7 +54,7 @@ function onError() {
 
 <template>
   <div class="asset-card" :style="{ width: `${cardWidth}px` }" :title="fileName">
-    <div class="thumb-box" :style="{ height: `${Math.round(cardWidth * 0.75)}px` }">
+    <div class="thumb-box" :style="{ height: `${cardWidth}px` }">
       <img
         v-if="imageState !== 'error'"
         ref="imgRef"

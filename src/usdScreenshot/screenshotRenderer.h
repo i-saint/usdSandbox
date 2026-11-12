@@ -9,11 +9,11 @@
 
 struct RenderOptions
 {
-    size_t imageWidth = 960;
+    size_t imageWidth = 512;
+    size_t imageHeight = 512;
     float complexity = 1.0f;
     std::string colorCorrectionMode = "sRGB";
     std::string rendererPlugin;
-    std::string camera;
     std::optional<double> timeCode;
     bool earliestTime = false;
     bool gpuEnabled = true;

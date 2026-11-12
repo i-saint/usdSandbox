@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import Button from 'primevue/button'
 import IconField from 'primevue/iconfield'
@@ -36,7 +36,7 @@ const currentDir = ref('')
 const subDirectories = ref<string[]>([])
 const files = ref<string[]>([])
 const searchQuery = ref('')
-const cardWidth = ref(200)
+const cardWidth = ref(192)
 const reloadToken = ref(0)
 
 const loadingDirs = ref(false)
@@ -201,7 +201,7 @@ onMounted(() => {
 
         <div class="size-control" title="サムネイルサイズ">
           <i class="pi pi-th-large" />
-          <Slider v-model="cardWidth" :min="140" :max="320" :step="10" class="size-slider" />
+          <Slider v-model="cardWidth" :min="128" :max="512" :step="16" class="size-slider" />
         </div>
       </div>
     </header>

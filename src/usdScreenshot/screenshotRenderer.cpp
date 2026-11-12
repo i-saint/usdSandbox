@@ -7,26 +7,39 @@
 #pragma warning(push, 0)
 #pragma warning(disable: 4244 4273 4305 4996)
 #include <pxr/pxr.h>
+#include <pxr/base/gf/bbox3d.h>
+#include <pxr/base/gf/camera.h>
+#include <pxr/base/gf/math.h>
+#include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/range1f.h>
+#include <pxr/base/gf/range3d.h>
+#include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/vec3d.h>
 #include <pxr/base/plug/registry.h>
 #include <pxr/base/tf/diagnosticMgr.h>
 #include <pxr/base/tf/errorMark.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/work/threadLimits.h>
+#include <pxr/imaging/cameraUtil/conformWindow.h>
 #include <pxr/imaging/garch/glApi.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/resolverContext.h>
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/path.h>
+#include <pxr/usd/usd/editContext.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usdGeom/bboxCache.h>
 #include <pxr/usd/usdGeom/camera.h>
-#include <pxr/usd/usdRender/settings.h>
-#include <pxr/usd/usdUtils/pipeline.h>
-#include <pxr/usdImaging/usdAppUtils/camera.h>
+#include <pxr/usd/usdGeom/metrics.h>
+#include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usdImaging/usdAppUtils/frameRecorder.h>
 #include <pxr/usdImaging/usdImagingGL/engine.h>
 #pragma warning(pop)
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <sstream>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -105,34 +118,93 @@ static std::string CollectErrors(const TfErrorMark& mark, const std::string& fal
     return combined.empty() ? fallbackMessage : combined;
 }
 
-static UsdGeomCamera ResolveCameraForStage(
+static GfCamera ComputeAutoFrameCamera(
     const UsdStageRefPtr& stage,
-    const std::string& requestedCamera,
-    const SdfPath& renderSettingsPath)
+    UsdTimeCode timeCode,
+    const TfTokenVector& includedPurposes,
+    size_t imageWidth,
+    size_t imageHeight)
 {
-    UsdGeomCamera usdCamera;
-    if (!requestedCamera.empty()) {
-        const SdfPath camPath(requestedCamera);
-        if (!camPath.IsEmpty())
-            usdCamera = UsdAppUtilsGetCameraAtPath(stage, camPath);
+    TfTokenVector bboxPurposes = { UsdGeomTokens->default_ };
+    for (const TfToken& p : includedPurposes) {
+        if (std::find(bboxPurposes.begin(), bboxPurposes.end(), p) == bboxPurposes.end())
+            bboxPurposes.push_back(p);
     }
 
-    if (!usdCamera && !renderSettingsPath.IsEmpty()) {
-        if (const UsdRenderSettings rs = UsdRenderSettings(stage->GetPrimAtPath(renderSettingsPath))) {
-            SdfPathVector targets;
-            rs.GetCameraRel().GetTargets(&targets);
-            if (!targets.empty())
-                usdCamera = UsdGeomCamera(stage->GetPrimAtPath(targets.front()));
+    UsdGeomBBoxCache bboxCache(timeCode, bboxPurposes, /*useExtentsHint=*/true);
+    GfBBox3d bbox = bboxCache.ComputeWorldBound(stage->GetPseudoRoot());
+    if (bbox.GetRange().IsEmpty()) {
+        UsdGeomBBoxCache fallbackCache(timeCode, bboxPurposes, /*useExtentsHint=*/false);
+        bbox = fallbackCache.ComputeWorldBound(stage->GetPseudoRoot());
+    }
+
+    GfVec3d center = bbox.ComputeCentroid();
+    GfRange3d body = bbox.ComputeAlignedRange();
+    if (body.IsEmpty()) {
+        body = GfRange3d(GfVec3d(-10.0, -10.0, -10.0), GfVec3d(10.0, 10.0, 10.0));
+        center = GfVec3d(0.0, 0.0, 0.0);
+    }
+
+    const TfToken upAxis = UsdGeomGetStageUpAxis(stage);
+    const bool isZUp = (upAxis == UsdGeomTokens->z);
+
+    const double aspectRatio = static_cast<double>(imageWidth) / static_cast<double>(imageHeight);
+    GfCamera gfCamera;
+    CameraUtilConformWindow(&gfCamera, CameraUtilFit, aspectRatio);
+
+    float hAp = gfCamera.GetHorizontalAperture();
+    const float vAp = gfCamera.GetVerticalAperture();
+    for (int i = 0; i < 8 && vAp > 0.0f && hAp > 0.0f; ++i) {
+        const size_t computedHeight = std::max<size_t>(
+            static_cast<size_t>(static_cast<float>(imageWidth) / (hAp / vAp)), 1u);
+        if (computedHeight < imageHeight)
+            hAp = std::nextafter(hAp, 0.0f);
+        else if (computedHeight > imageHeight)
+            hAp = std::nextafter(hAp, std::numeric_limits<float>::infinity());
+        else
+            break;
+    }
+    gfCamera.SetHorizontalAperture(hAp);
+
+    const GfVec3d viewDir = GfVec3d(0.5, 0.7, 1.0).GetNormalized();
+    GfMatrix4d viewRot(1.0);
+    viewRot.SetLookAt(GfVec3d(0.0, 0.0, 0.0), -viewDir, GfVec3d(0.0, 1.0, 0.0));
+
+    const GfMatrix4d worldToViewAligned =
+        (isZUp ? GfMatrix4d(1.0).SetRotate(GfRotation(GfVec3d::XAxis(), -90.0)) : GfMatrix4d(1.0)) * viewRot;
+
+    const double fovH = GfDegreesToRadians(static_cast<double>(gfCamera.GetFieldOfView(GfCamera::FOVHorizontal)));
+    const double fovV = GfDegreesToRadians(static_cast<double>(gfCamera.GetFieldOfView(GfCamera::FOVVertical)));
+    const double tanHalfH = std::tan(fovH * 0.5);
+    const double tanHalfV = std::tan(fovV * 0.5);
+    constexpr double kMargin = 1.05;
+
+    double distance = 0.0;
+    if (tanHalfH > 1e-6 && tanHalfV > 1e-6) {
+        for (int i = 0; i < 8; ++i) {
+            const GfVec3d rel = body.GetCorner(i) - center;
+            const GfVec3d v = worldToViewAligned.TransformDir(rel);
+            distance = std::max(distance, v[2] + (std::abs(v[0]) * kMargin) / tanHalfH);
+            distance = std::max(distance, v[2] + (std::abs(v[1]) * kMargin) / tanHalfV);
         }
     }
-
-    if (!usdCamera) {
-        const TfToken primaryCameraName = UsdUtilsGetPrimaryCameraName();
-        if (!primaryCameraName.IsEmpty())
-            usdCamera = UsdAppUtilsGetCameraAtPath(stage, SdfPath(primaryCameraName.GetString()));
+    if (distance <= 0.0) {
+        const double metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
+        distance = (metersPerUnit > 0.0) ? (1.0 / metersPerUnit) : 100.0;
     }
 
-    return usdCamera;
+    const double radius = std::max(body.GetSize().GetLength() * 0.5, 1e-3);
+    const float nearClip = static_cast<float>(std::max(std::max((distance - radius) * 0.1, distance * 1e-4), 1e-6));
+    const float farClip = static_cast<float>(std::max((distance + radius) * 10.0, static_cast<double>(nearClip) * 1000.0));
+    gfCamera.SetClippingRange(GfRange1f(nearClip, farClip));
+
+    GfMatrix4d camTransform = viewRot.GetInverse() * GfMatrix4d(1.0).SetTranslate(viewDir * distance);
+    if (isZUp)
+        camTransform = camTransform * GfMatrix4d(1.0).SetRotate(GfRotation(GfVec3d::XAxis(), 90.0));
+    camTransform = camTransform * GfMatrix4d(1.0).SetTranslate(center);
+    gfCamera.SetTransform(camTransform);
+
+    return gfCamera;
 }
 
 bool ScreenshotRenderer::Initialize(const RenderOptions& options, std::string* errorMessage)
@@ -218,13 +290,6 @@ bool ScreenshotRenderer::Render(
         return false;
     }
 
-    SdfPath renderSettingsPath;
-    std::string rsPathStr;
-    if (stage->GetMetadata(TfToken("renderSettingsPrimPath"), &rsPathStr) && !rsPathStr.empty())
-        renderSettingsPath = SdfPath(rsPathStr);
-
-    UsdGeomCamera usdCamera = ResolveCameraForStage(stage, m_options.camera, renderSettingsPath);
-
     UsdTimeCode timeCode = UsdTimeCode::Default();
     if (m_options.timeCode.has_value()) {
         timeCode = UsdTimeCode(*m_options.timeCode);
@@ -240,6 +305,24 @@ bool ScreenshotRenderer::Render(
             purposeTokens.emplace_back(p);
     }
 
+    const size_t width = m_options.imageWidth > 0 ? m_options.imageWidth : 1;
+    const size_t height = m_options.imageHeight > 0 ? m_options.imageHeight : 1;
+
+    const GfCamera gfCamera = ComputeAutoFrameCamera(stage, timeCode, purposeTokens, width, height);
+
+    UsdGeomCamera screenshotCamera;
+    {
+        UsdEditContext editContext(stage, stage->GetSessionLayer());
+        screenshotCamera = UsdGeomCamera::Define(stage, SdfPath("/__ScreenshotCamera"));
+        if (!screenshotCamera) {
+            if (errorMessage)
+                *errorMessage = CollectErrors(errorMark, "Failed to define /__ScreenshotCamera");
+            errorMark.Clear();
+            return false;
+        }
+        screenshotCamera.SetFromCamera(gfCamera, timeCode);
+    }
+
     const TfToken rendererId = m_resolvedRendererId.empty()
         ? TfToken()
         : TfToken(m_resolvedRendererId);
@@ -249,19 +332,15 @@ bool ScreenshotRenderer::Render(
         m_options.gpuEnabled,
         m_options.enableUsdDrawModes);
 
-    if (!renderSettingsPath.IsEmpty())
-        recorder.SetActiveRenderSettingsPrimPath(renderSettingsPath);
-
-    recorder.SetImageWidth(m_options.imageWidth > 0 ? m_options.imageWidth : 1);
+    recorder.SetImageWidth(width);
     recorder.SetComplexity(m_options.complexity);
     recorder.SetCameraLightEnabled(m_options.cameraLightEnabled);
     recorder.SetColorCorrectionMode(TfToken(m_options.colorCorrectionMode));
     recorder.SetIncludedPurposes(purposeTokens);
     recorder.SetDomeLightVisibility(m_options.domeLightVisibility);
-    if (usdCamera)
-        recorder.SetPrimaryCameraPrimPath(usdCamera.GetPath());
+    recorder.SetPrimaryCameraPrimPath(screenshotCamera.GetPath());
 
-    const bool recorded = recorder.Record(stage, usdCamera, timeCode, outputImagePath);
+    const bool recorded = recorder.Record(stage, screenshotCamera, timeCode, outputImagePath);
     if (!recorded) {
         if (errorMessage)
             *errorMessage = CollectErrors(errorMark, "Failed to record screenshot: " + usdFilePath);

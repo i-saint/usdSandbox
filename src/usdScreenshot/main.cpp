@@ -135,12 +135,12 @@ static void PrintUsage()
         "  --verbose                       Forward worker stderr and extra diagnostics\n"
         "  -q, --quiet                     Suppress per-file success logs\n"
         "\n"
-        "Render Options (usdrecord compatible):\n"
-        "  -w, --imageWidth <px>           Output image width (default: 960)\n"
+        "Render Options:\n"
+        "  -w, --width, --imageWidth <px>  Output image width (default: 512)\n"
+        "  --height, --imageHeight <px>    Output image height (default: 512)\n"
         "  --complexity <level|float>      low (1.0), medium (1.1), high (1.2), veryhigh (1.3)\n"
         "  --colorCorrectionMode <mode>    disabled, sRGB, openColorIO (default: sRGB)\n"
         "  -r, --renderer <name>           Hydra renderer plugin (default: Storm / GL)\n"
-        "  -cam, --camera <pathOrName>     Camera prim path or prim name\n"
         "  --time <default|earliest|frame> TimeCode to render (default: default)\n"
         "  --purposes <p1,p2,...>          Additional UsdGeom purposes (default: proxy)\n"
         "  --disableGpu                    Disable GPU usage in Hydra\n"
@@ -183,7 +183,21 @@ static bool ParseCommandLine(const std::vector<std::string>& args, CliConfig* cf
             return true;
         };
 
-        if (arg == "-h" || arg == "--help" || arg == "/?") {
+        if (arg == "--help" || arg == "/?") {
+            cfg->showHelp = true;
+            return true;
+        }
+        if (arg == "-h") {
+            if (i + 1 < args.size()) {
+                const std::string& next = args[i + 1];
+                size_t height = 0;
+                const auto res = std::from_chars(next.data(), next.data() + next.size(), height);
+                if (res.ec == std::errc{} && res.ptr == next.data() + next.size() && height > 0) {
+                    cfg->render.imageHeight = height;
+                    ++i;
+                    continue;
+                }
+            }
             cfg->showHelp = true;
             return true;
         }
@@ -245,10 +259,22 @@ static bool ParseCommandLine(const std::vector<std::string>& args, CliConfig* cf
             size_t width = 0;
             const auto res = std::from_chars(val.data(), val.data() + val.size(), width);
             if (res.ec != std::errc{} || res.ptr != val.data() + val.size() || width == 0) {
-                *errorMsg = "Invalid --imageWidth value: " + val;
+                *errorMsg = "Invalid --width value: " + val;
                 return false;
             }
             cfg->render.imageWidth = width;
+        }
+        else if (arg == "--imageHeight" || arg == "--height") {
+            std::string val;
+            if (!requireValue(arg.c_str(), &val))
+                return false;
+            size_t height = 0;
+            const auto res = std::from_chars(val.data(), val.data() + val.size(), height);
+            if (res.ec != std::errc{} || res.ptr != val.data() + val.size() || height == 0) {
+                *errorMsg = "Invalid --height value: " + val;
+                return false;
+            }
+            cfg->render.imageHeight = height;
         }
         else if (arg == "--complexity") {
             std::string val;
@@ -271,10 +297,6 @@ static bool ParseCommandLine(const std::vector<std::string>& args, CliConfig* cf
         }
         else if (arg == "-r" || arg == "--renderer") {
             if (!requireValue(arg.c_str(), &cfg->render.rendererPlugin))
-                return false;
-        }
-        else if (arg == "-cam" || arg == "--camera") {
-            if (!requireValue(arg.c_str(), &cfg->render.camera))
                 return false;
         }
         else if (arg == "--time") {

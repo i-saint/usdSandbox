@@ -95,6 +95,8 @@ static std::wstring BuildWorkerCommandLine(const std::wstring& exePath, const Re
     args.push_back(L"--worker");
     args.push_back(L"--imageWidth");
     args.push_back(std::to_wstring(opts.imageWidth));
+    args.push_back(L"--imageHeight");
+    args.push_back(std::to_wstring(opts.imageHeight));
 
     {
         std::wostringstream oss;
@@ -110,10 +112,6 @@ static std::wstring BuildWorkerCommandLine(const std::wstring& exePath, const Re
     if (!opts.rendererPlugin.empty()) {
         args.push_back(L"--renderer");
         args.push_back(Utf8ToWide(opts.rendererPlugin));
-    }
-    if (!opts.camera.empty()) {
-        args.push_back(L"--camera");
-        args.push_back(Utf8ToWide(opts.camera));
     }
     if (opts.timeCode.has_value()) {
         std::wostringstream oss;
