@@ -135,57 +135,12 @@ static UsdGeomCamera ResolveCameraForStage(
     return usdCamera;
 }
 
-void RegisterUsdPluginsFromExecutableDir()
-{
-    static bool registered = false;
-    if (registered)
-        return;
-    registered = true;
-
-    const std::filesystem::path exeDir = GetExecutableDirectory();
-    std::vector<std::string> pluginPaths;
-
-    auto addIfExists = [&pluginPaths](const std::filesystem::path& p) {
-        std::error_code ec;
-        if (std::filesystem::exists(p, ec))
-            pluginPaths.push_back(PathToUtf8(p));
-    };
-
-    // Standard deployed USD plugins next to executable / usd_ms.dll
-    addIfExists(exeDir / L"usd" / L"plugInfo.json");
-    addIfExists(exeDir / L"plugInfo.json");
-    addIfExists(exeDir / L"resources" / L"plugInfo.json");
-
-    // Local plugins in sibling subdirectories (e.g. usdObjPlus/plugInfo.json)
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(exeDir, ec)) {
-        if (!entry.is_directory(ec))
-            continue;
-        if (entry.path().filename() == L"usd")
-            continue;
-        addIfExists(entry.path() / L"plugInfo.json");
-        addIfExists(entry.path() / L"resources" / L"plugInfo.json");
-    }
-
-    // Fallback to workspace externals/usd when running from _bin/<config>/
-    const std::filesystem::path workspaceSdkRoot = exeDir.parent_path().parent_path() / L"externals" / L"usd";
-    if (!std::filesystem::exists(exeDir / L"usd" / L"plugInfo.json", ec)) {
-        addIfExists(workspaceSdkRoot / L"lib" / L"usd" / L"plugInfo.json");
-        addIfExists(workspaceSdkRoot / L"plugin" / L"usd" / L"plugInfo.json");
-    }
-
-    if (!pluginPaths.empty())
-        PlugRegistry::GetInstance().RegisterPlugins(pluginPaths);
-}
-
 bool ScreenshotRenderer::Initialize(const RenderOptions& options, std::string* errorMessage)
 {
     m_options = options;
 
     if (m_options.threadsPerWorker > 0)
         WorkSetConcurrencyLimit(m_options.threadsPerWorker);
-
-    RegisterUsdPluginsFromExecutableDir();
 
     if (m_options.gpuEnabled) {
         if (!m_glContext.Initialize(errorMessage))

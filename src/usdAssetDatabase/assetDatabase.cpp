@@ -43,7 +43,6 @@ static void WriteConsoleLine(bool toStderr, std::string_view message)
 
 static std::string PathToUtf8(const std::filesystem::path& path)
 {
-#ifdef _WIN32
     const std::wstring& wide = path.native();
     if (wide.empty())
         return {};
@@ -55,14 +54,10 @@ static std::string PathToUtf8(const std::filesystem::path& path)
     WideCharToMultiByte(
         CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), utf8Len, nullptr, nullptr);
     return utf8;
-#else
-    return path.string();
-#endif
 }
 
 static std::filesystem::path PathFromUtf8(std::string_view utf8)
 {
-#ifdef _WIN32
     if (utf8.empty())
         return {};
     const int wideLen = MultiByteToWideChar(
@@ -73,9 +68,6 @@ static std::filesystem::path PathFromUtf8(std::string_view utf8)
     MultiByteToWideChar(
         CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), wideLen);
     return std::filesystem::path(wide);
-#else
-    return std::filesystem::path(utf8);
-#endif
 }
 
 static std::string ToLowerAscii(std::string_view input)
@@ -87,7 +79,6 @@ static std::string ToLowerAscii(std::string_view input)
     return result;
 }
 
-#ifdef _WIN32
 static std::filesystem::path GetModuleDirectory(HMODULE moduleHandle)
 {
     std::wstring buffer(MAX_PATH, L'\0');
@@ -114,61 +105,9 @@ static std::filesystem::path GetCurrentDllDirectory()
     }
     return GetModuleDirectory(thisModule);
 }
-#endif
-
-static void RegisterUsdPluginsForDirectory(const std::filesystem::path& baseDir, std::vector<std::string>& pluginPaths)
-{
-    if (baseDir.empty())
-        return;
-
-    auto addIfExists = [&pluginPaths](const std::filesystem::path& p) {
-        std::error_code ec;
-        if (std::filesystem::exists(p, ec))
-            pluginPaths.push_back(PathToUtf8(p));
-    };
-
-    addIfExists(baseDir / "usd" / "plugInfo.json");
-    addIfExists(baseDir / "plugInfo.json");
-    addIfExists(baseDir / "resources" / "plugInfo.json");
-
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(baseDir, ec)) {
-        if (!entry.is_directory(ec))
-            continue;
-        if (entry.path().filename() == "usd")
-            continue;
-        addIfExists(entry.path() / "plugInfo.json");
-        addIfExists(entry.path() / "resources" / "plugInfo.json");
-    }
-
-    if (!std::filesystem::exists(baseDir / "usd" / "plugInfo.json", ec)) {
-        const std::filesystem::path workspaceSdkRoot = baseDir.parent_path().parent_path() / "externals" / "usd";
-        addIfExists(workspaceSdkRoot / "lib" / "usd" / "plugInfo.json");
-        addIfExists(workspaceSdkRoot / "plugin" / "usd" / "plugInfo.json");
-    }
-}
-
-static void EnsureUsdPluginsRegistered()
-{
-    static std::once_flag onceFlag;
-    std::call_once(onceFlag, []() {
-        std::vector<std::string> pluginPaths;
-#ifdef _WIN32
-        const std::filesystem::path dllDir = GetCurrentDllDirectory();
-        const std::filesystem::path exeDir = GetModuleDirectory(nullptr);
-        RegisterUsdPluginsForDirectory(dllDir, pluginPaths);
-        if (!exeDir.empty() && exeDir != dllDir)
-            RegisterUsdPluginsForDirectory(exeDir, pluginPaths);
-#endif
-        if (!pluginPaths.empty())
-            pxr::PlugRegistry::GetInstance().RegisterPlugins(pluginPaths);
-    });
-}
 
 static std::unordered_set<std::string> CollectSupportedExtensions()
 {
-    EnsureUsdPluginsRegistered();
-
     std::unordered_set<std::string> extensions = {
         "fbx",
         "usd",
@@ -247,7 +186,6 @@ static std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
     if (ec)
         norm = path.lexically_normal();
 
-#ifdef _WIN32
     std::wstring wide = norm.native();
     for (wchar_t& ch : wide) {
         if (ch == L'/')
@@ -256,9 +194,6 @@ static std::wstring MakeNormalizedPathKey(const std::filesystem::path& path)
     if (!wide.empty())
         ::CharLowerBuffW(wide.data(), static_cast<DWORD>(wide.size()));
     return wide;
-#else
-    return norm.wstring();
-#endif
 }
 
 static bool IsScreenshotNewerThanSource(
@@ -283,7 +218,6 @@ static bool IsScreenshotNewerThanSource(
     return screenshotWriteTime > sourceWriteTime;
 }
 
-#ifdef _WIN32
 static constexpr std::string_view kWorkerPrefixReady = "@@READY";
 static constexpr std::string_view kWorkerPrefixOk = "@@OK";
 static constexpr std::string_view kWorkerPrefixErr = "@@ERR";
@@ -677,7 +611,6 @@ private:
     HANDLE m_stdoutRead = nullptr;
     std::string m_readBuffer;
 };
-#endif // _WIN32
 
 class ScreenshotWorkerPool
 {
@@ -697,7 +630,6 @@ public:
 
     void SetWorkerCount(size_t workerCount)
     {
-#ifdef _WIN32
         bool restartNeeded = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -710,19 +642,12 @@ public:
             Stop();
             Start();
         }
-#else
-        m_configuredWorkerCount = workerCount;
-#endif
     }
 
     size_t GetWorkerCount() const
     {
-#ifdef _WIN32
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_configuredWorkerCount;
-#else
-        return m_configuredWorkerCount;
-#endif
     }
 
     void SetLogLevel(IAssetDatabase::LogLevel level)
@@ -737,7 +662,6 @@ public:
 
     void Start()
     {
-#ifdef _WIN32
         std::lock_guard<std::mutex> lifecycleLock(m_lifecycleMutex);
 
         size_t slotCount = 0;
@@ -783,12 +707,10 @@ public:
             std::lock_guard<std::mutex> lock(m_mutex);
             m_started = true;
         }
-#endif
     }
 
     void Stop()
     {
-#ifdef _WIN32
         std::lock_guard<std::mutex> lifecycleLock(m_lifecycleMutex);
 
         {
@@ -822,14 +744,12 @@ public:
             m_stopping = false;
         }
         m_completionCv.notify_all();
-#endif
     }
 
     void EnqueueDirectoryFiles(
         const std::filesystem::path& directoryPath,
         const std::vector<std::string>& fileNames)
     {
-#ifdef _WIN32
         if (fileNames.empty())
             return;
 
@@ -898,15 +818,10 @@ public:
                 }
             }
         }
-#else
-        (void)directoryPath;
-        (void)fileNames;
-#endif
     }
 
     void WaitForPendingScreenshot(const std::filesystem::path& screenshotPath)
     {
-#ifdef _WIN32
         const std::wstring key = MakeNormalizedPathKey(screenshotPath);
         std::unique_lock<std::mutex> lock(m_mutex);
         if (!m_activeKeys.contains(key))
@@ -926,13 +841,9 @@ public:
         m_completionCv.wait(lock, [this, &key]() {
             return m_stopping || !m_activeKeys.contains(key);
         });
-#else
-        (void)screenshotPath;
-#endif
     }
 
 private:
-#ifdef _WIN32
     struct Task
     {
         std::filesystem::path sourcePath;
@@ -1077,10 +988,6 @@ private:
     std::filesystem::path m_workerWorkDir;
     std::wstring m_workerCommandLine;
     std::vector<std::unique_ptr<WorkerSlot>> m_slots;
-#else
-    size_t m_configuredWorkerCount = kDefaultWorkerCount;
-    std::atomic<int> m_logLevel{ static_cast<int>(IAssetDatabase::LogLevel::Info) };
-#endif
 };
 
 class AssetDatabase final : public IAssetDatabase
