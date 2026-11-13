@@ -447,7 +447,7 @@ bool Triangulator::SimpleTriangulate(std::span<const int> indices)
     return true;
 }
 
-static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::vector<int>& boundary)
+static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::vector<int>& boundary, std::vector<int>& sourceIndices)
 {
     if (triangleIndices.size() < 6 || triangleIndices.size() % 3 != 0) {
         return false;
@@ -458,9 +458,11 @@ static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::v
             static_cast<std::uint32_t>(to);
     };
     std::vector<std::pair<int, int>> edges;
+    std::vector<int> edgeSources;
     std::vector<bool> activeEdges;
     std::unordered_map<std::uint64_t, size_t> edgeIndices;
     edges.reserve(triangleIndices.size());
+    edgeSources.reserve(triangleIndices.size());
     activeEdges.reserve(triangleIndices.size());
     edgeIndices.reserve(triangleIndices.size());
     for (size_t i = 0; i < triangleIndices.size(); i += 3) {
@@ -485,16 +487,20 @@ static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::v
             else {
                 edgeIndices.emplace(key, edges.size());
                 edges.emplace_back(from, to);
+                edgeSources.push_back(static_cast<int>(i + static_cast<size_t>(edge)));
                 activeEdges.push_back(true);
             }
         }
     }
 
     std::vector<std::pair<int, int>> boundaryEdges;
+    std::unordered_map<int, int> boundarySourceIndices;
     boundaryEdges.reserve(edgeIndices.size());
+    boundarySourceIndices.reserve(edgeIndices.size());
     for (size_t i = 0; i < edges.size(); ++i) {
         if (activeEdges[i]) {
             boundaryEdges.push_back(edges[i]);
+            boundarySourceIndices.emplace(edges[i].first, edgeSources[i]);
         }
     }
     if (boundaryEdges.size() != triangleIndices.size() / 3 + 2) {
@@ -512,7 +518,9 @@ static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::v
     }
 
     boundary.clear();
+    sourceIndices.clear();
     boundary.reserve(boundaryEdges.size());
+    sourceIndices.reserve(boundaryEdges.size());
     std::unordered_set<int> visited;
     visited.reserve(boundaryEdges.size());
     const int first = boundaryEdges.front().first;
@@ -522,6 +530,11 @@ static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::v
             return false;
         }
         boundary.push_back(current);
+        const auto source = boundarySourceIndices.find(current);
+        if (source == boundarySourceIndices.end()) {
+            return false;
+        }
+        sourceIndices.push_back(source->second);
         const auto next = nextVertex.find(current);
         if (next == nextVertex.end()) {
             return false;
@@ -610,6 +623,7 @@ void Detriangulator::Clear()
 {
     counts.clear();
     indices.clear();
+    new2oldIndices.clear();
 }
 
 bool Detriangulator::Detriangulate(std::span<const int> triangleIndices)
@@ -624,29 +638,36 @@ bool Detriangulator::Detriangulate(std::span<const int> triangleIndices)
     while (triangle < triangleCount) {
         size_t recoveredEnd = triangle;
         std::vector<int> recoveredBoundary;
+        std::vector<int> recoveredSourceIndices;
 
         for (size_t end = triangle + 2; end < triangleCount; ++end) {
             const std::span<const int> candidate{ triangleIndices.data() + triangle * 3, (end - triangle + 1) * 3 };
             std::vector<int> boundary;
-            if (!TryBuildPolygonBoundary(candidate, boundary)) {
+            std::vector<int> sourceIndices;
+            if (!TryBuildPolygonBoundary(candidate, boundary, sourceIndices)) {
                 break;
             }
             if (MatchesEarClipSequence(candidate, boundary) || MatchesSimpleTriangulation(candidate, boundary)) {
                 recoveredEnd = end;
                 recoveredBoundary = std::move(boundary);
+                recoveredSourceIndices = std::move(sourceIndices);
             }
         }
 
         if (recoveredEnd > triangle) {
             counts.push_back(static_cast<int>(recoveredBoundary.size()));
             indices.insert(indices.end(), recoveredBoundary.begin(), recoveredBoundary.end());
+            for (int sourceIndex : recoveredSourceIndices) {
+                new2oldIndices.push_back(static_cast<int>(triangle * 3) + sourceIndex);
+            }
             triangle = recoveredEnd + 1;
         }
         else {
             counts.push_back(3);
-            indices.push_back(triangleIndices[triangle * 3]);
-            indices.push_back(triangleIndices[triangle * 3 + 1]);
-            indices.push_back(triangleIndices[triangle * 3 + 2]);
+            for (size_t corner = 0; corner < 3; ++corner) {
+                indices.push_back(triangleIndices[triangle * 3 + corner]);
+                new2oldIndices.push_back(static_cast<int>(triangle * 3 + corner));
+            }
             ++triangle;
         }
     }
@@ -895,6 +916,111 @@ bool TriangulateMesh(const MeshData& src, MeshData& dst)
         offset += count;
     }
 
+    return true;
+}
+
+bool DetriangulateMesh(const MeshData& src, MeshData& dst)
+{
+    if (src.counts.empty()) {
+        return false;
+    }
+
+    size_t cornerCount = 0;
+    for (int count : src.counts) {
+        if (count != 3) {
+            return false;
+        }
+        cornerCount += 3;
+    }
+
+    VtArray<int> sourceIndices = src.indices;
+    if (sourceIndices.empty()) {
+        if (cornerCount != src.points.size()) {
+            return false;
+        }
+        sourceIndices.resize(cornerCount, [](int* begin, int* end) { std::iota(begin, end, 0); });
+    }
+    else if (sourceIndices.size() != cornerCount) {
+        return false;
+    }
+
+    for (int pointIndex : sourceIndices) {
+        if (pointIndex < 0 || pointIndex >= static_cast<int>(src.points.size())) {
+            return false;
+        }
+    }
+
+    Detriangulator detriangulator;
+    if (!detriangulator.Detriangulate(sourceIndices)) {
+        return false;
+    }
+
+    MeshData result;
+    result.counts = detriangulator.counts;
+    result.indices = detriangulator.indices;
+    result.points = src.points;
+
+    if (src.jointsPerVertex < 0) {
+        return false;
+    }
+    if (src.jointsPerVertex > 0) {
+        const size_t jointElementCount = src.points.size() * static_cast<size_t>(src.jointsPerVertex);
+        if (src.jointIndices.size() != jointElementCount || src.jointWeights.size() != jointElementCount) {
+            return false;
+        }
+        result.jointsPerVertex = src.jointsPerVertex;
+        result.jointIndices = src.jointIndices;
+        result.jointWeights = src.jointWeights;
+    }
+    else {
+        if (!src.jointIndices.empty() || !src.jointWeights.empty()) {
+            return false;
+        }
+        result.jointsPerVertex = 0;
+    }
+
+    auto detriangulatePrimvar = [&]<typename T>(const PrimvarData<T>& srcPV, PrimvarData<T>& dstPV) {
+        dstPV.indices.clear();
+        dstPV.values.clear();
+        if (srcPV.values.empty()) {
+            return srcPV.indices.empty();
+        }
+
+        if (!srcPV.indices.empty()) {
+            if (srcPV.indices.size() != cornerCount) {
+                return false;
+            }
+            for (int index : srcPV.indices) {
+                if (index < 0 || index >= static_cast<int>(srcPV.values.size())) {
+                    return false;
+                }
+            }
+            dstPV.values = srcPV.values;
+            dstPV.indices.reserve(detriangulator.new2oldIndices.size());
+            for (int oldIndex : detriangulator.new2oldIndices) {
+                dstPV.indices.push_back(srcPV.indices[oldIndex]);
+            }
+        }
+        else if (srcPV.values.size() == src.points.size()) {
+            dstPV.values = srcPV.values;
+        }
+        else if (srcPV.values.size() == cornerCount) {
+            dstPV.values.reserve(detriangulator.new2oldIndices.size());
+            for (int oldIndex : detriangulator.new2oldIndices) {
+                dstPV.values.push_back(srcPV.values[oldIndex]);
+            }
+        }
+        else {
+            return false;
+        }
+        return true;
+    };
+
+#define Action(name) if (!detriangulatePrimvar(src.name, result.name)) return false;
+    EachMeshPrimvar(Action);
+#undef Action
+
+    dst = std::move(result);
     return true;
 }
 #pragma endregion Triangulation

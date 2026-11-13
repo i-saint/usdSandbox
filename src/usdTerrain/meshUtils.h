@@ -103,6 +103,7 @@ public:
     // 三角形 indices の連続した出力順から、復元可能なポリゴンをまとめる。
     VtArray<int> counts;
     VtArray<int> indices;
+    VtArray<int> new2oldIndices;
 
     bool Detriangulate(std::span<const int> triangleIndices);
     void Clear();
@@ -116,6 +117,9 @@ bool RefineMesh(const MeshData& src, MeshData& dst);
 
 // 三角形化。line / point は無視される
 bool TriangulateMesh(const MeshData& src, MeshData& dst);
+
+// 三角形化された mesh を可能な範囲で多角形に戻す。
+bool DetriangulateMesh(const MeshData& src, MeshData& dst);
 
 // 頂点あたりの joint 数を変更する。
 // 減らす場合は影響度の小さいものを切り捨てて正規化し、増やす場合は 0 で埋める。
