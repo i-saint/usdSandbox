@@ -2,6 +2,7 @@
 #include "meshUtils.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <unordered_set>
 
 using float2 = GfVec2f;
@@ -442,6 +443,212 @@ bool Triangulator::SimpleTriangulate(std::span<const int> indices)
 
         ++nextVertex;
         --prevVertex;
+    }
+    return true;
+}
+
+static bool TryBuildPolygonBoundary(std::span<const int> triangleIndices, std::vector<int>& boundary)
+{
+    if (triangleIndices.size() < 6 || triangleIndices.size() % 3 != 0) {
+        return false;
+    }
+
+    auto edgeKey = [](int from, int to) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(from)) << 32) |
+            static_cast<std::uint32_t>(to);
+    };
+    std::vector<std::pair<int, int>> edges;
+    std::vector<bool> activeEdges;
+    std::unordered_map<std::uint64_t, size_t> edgeIndices;
+    edges.reserve(triangleIndices.size());
+    activeEdges.reserve(triangleIndices.size());
+    edgeIndices.reserve(triangleIndices.size());
+    for (size_t i = 0; i < triangleIndices.size(); i += 3) {
+        const int triangle[] = { triangleIndices[i], triangleIndices[i + 1], triangleIndices[i + 2] };
+        if (triangle[0] == triangle[1] || triangle[1] == triangle[2] || triangle[2] == triangle[0]) {
+            return false;
+        }
+
+        for (int edge = 0; edge < 3; ++edge) {
+            const int from = triangle[edge];
+            const int to = triangle[(edge + 1) % 3];
+            const std::uint64_t key = edgeKey(from, to);
+            const std::uint64_t reverseKey = edgeKey(to, from);
+            const auto opposite = edgeIndices.find(reverseKey);
+            if (opposite != edgeIndices.end()) {
+                activeEdges[opposite->second] = false;
+                edgeIndices.erase(opposite);
+            }
+            else if (edgeIndices.contains(key)) {
+                return false;
+            }
+            else {
+                edgeIndices.emplace(key, edges.size());
+                edges.emplace_back(from, to);
+                activeEdges.push_back(true);
+            }
+        }
+    }
+
+    std::vector<std::pair<int, int>> boundaryEdges;
+    boundaryEdges.reserve(edgeIndices.size());
+    for (size_t i = 0; i < edges.size(); ++i) {
+        if (activeEdges[i]) {
+            boundaryEdges.push_back(edges[i]);
+        }
+    }
+    if (boundaryEdges.size() != triangleIndices.size() / 3 + 2) {
+        return false;
+    }
+
+    std::unordered_map<int, int> nextVertex;
+    std::unordered_set<int> incomingVertices;
+    nextVertex.reserve(boundaryEdges.size());
+    incomingVertices.reserve(boundaryEdges.size());
+    for (const auto& [from, to] : boundaryEdges) {
+        if (!nextVertex.emplace(from, to).second || !incomingVertices.insert(to).second) {
+            return false;
+        }
+    }
+
+    boundary.clear();
+    boundary.reserve(boundaryEdges.size());
+    std::unordered_set<int> visited;
+    visited.reserve(boundaryEdges.size());
+    const int first = boundaryEdges.front().first;
+    int current = first;
+    do {
+        if (!visited.insert(current).second) {
+            return false;
+        }
+        boundary.push_back(current);
+        const auto next = nextVertex.find(current);
+        if (next == nextVertex.end()) {
+            return false;
+        }
+        current = next->second;
+    } while (current != first && boundary.size() <= boundaryEdges.size());
+
+    return current == first && boundary.size() == boundaryEdges.size();
+}
+
+static bool MatchesEarClipSequence(std::span<const int> triangleIndices, const std::vector<int>& boundary)
+{
+    const int firstVertex = triangleIndices[0];
+    const auto start = std::find(boundary.begin(), boundary.end(), firstVertex);
+    if (start == boundary.end()) {
+        return false;
+    }
+
+    std::vector<int> polygon;
+    polygon.reserve(boundary.size());
+    const size_t startIndex = static_cast<size_t>(start - boundary.begin());
+    for (size_t i = 0; i < boundary.size(); ++i) {
+        polygon.push_back(boundary[(startIndex + i) % boundary.size()]);
+    }
+
+    std::unordered_map<int, int> nextVertex;
+    nextVertex.reserve(polygon.size());
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        nextVertex.emplace(polygon[i], polygon[(i + 1) % polygon.size()]);
+    }
+
+    const size_t triangleCount = triangleIndices.size() / 3;
+    for (size_t triangle = 0; triangle + 1 < triangleCount; ++triangle) {
+        const int a = triangleIndices[triangle * 3];
+        const int b = triangleIndices[triangle * 3 + 1];
+        const int c = triangleIndices[triangle * 3 + 2];
+        const auto aNext = nextVertex.find(a);
+        const auto bNext = nextVertex.find(b);
+        if (aNext == nextVertex.end() || bNext == nextVertex.end() || aNext->second != b || bNext->second != c) {
+            return false;
+        }
+        aNext->second = c;
+        nextVertex.erase(bNext);
+    }
+
+    const int a = triangleIndices[triangleIndices.size() - 3];
+    const int b = triangleIndices[triangleIndices.size() - 2];
+    const int c = triangleIndices[triangleIndices.size() - 1];
+    const auto aNext = nextVertex.find(a);
+    const auto bNext = nextVertex.find(b);
+    return nextVertex.size() == 3 && aNext != nextVertex.end() && bNext != nextVertex.end() &&
+        aNext->second == b && bNext->second == c;
+}
+
+static bool MatchesSimpleTriangulation(std::span<const int> triangleIndices, const std::vector<int>& boundary)
+{
+    const auto start = std::find(boundary.begin(), boundary.end(), triangleIndices[0]);
+    if (start == boundary.end()) {
+        return false;
+    }
+
+    std::vector<int> polygon;
+    polygon.reserve(boundary.size());
+    const size_t startIndex = static_cast<size_t>(start - boundary.begin());
+    for (size_t i = 0; i < boundary.size(); ++i) {
+        polygon.push_back(boundary[(startIndex + i) % boundary.size()]);
+    }
+
+    Triangulator triangulator;
+    if (!triangulator.SimpleTriangulate(polygon)) {
+        return false;
+    }
+    const std::span<const int> result = triangulator.GetResult();
+    if (result.size() != triangleIndices.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < result.size(); ++i) {
+        if (polygon[result[i]] != triangleIndices[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void Detriangulator::Clear()
+{
+    counts.clear();
+    indices.clear();
+}
+
+bool Detriangulator::Detriangulate(std::span<const int> triangleIndices)
+{
+    Clear();
+    if (triangleIndices.size() % 3 != 0) {
+        return false;
+    }
+
+    size_t triangle = 0;
+    const size_t triangleCount = triangleIndices.size() / 3;
+    while (triangle < triangleCount) {
+        size_t recoveredEnd = triangle;
+        std::vector<int> recoveredBoundary;
+
+        for (size_t end = triangle + 2; end < triangleCount; ++end) {
+            const std::span<const int> candidate{ triangleIndices.data() + triangle * 3, (end - triangle + 1) * 3 };
+            std::vector<int> boundary;
+            if (!TryBuildPolygonBoundary(candidate, boundary)) {
+                break;
+            }
+            if (MatchesEarClipSequence(candidate, boundary) || MatchesSimpleTriangulation(candidate, boundary)) {
+                recoveredEnd = end;
+                recoveredBoundary = std::move(boundary);
+            }
+        }
+
+        if (recoveredEnd > triangle) {
+            counts.push_back(static_cast<int>(recoveredBoundary.size()));
+            indices.insert(indices.end(), recoveredBoundary.begin(), recoveredBoundary.end());
+            triangle = recoveredEnd + 1;
+        }
+        else {
+            counts.push_back(3);
+            indices.push_back(triangleIndices[triangle * 3]);
+            indices.push_back(triangleIndices[triangle * 3 + 1]);
+            indices.push_back(triangleIndices[triangle * 3 + 2]);
+            ++triangle;
+        }
     }
     return true;
 }

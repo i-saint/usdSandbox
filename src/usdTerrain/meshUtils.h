@@ -97,6 +97,17 @@ private:
     std::vector<float2> polygon2DVertices;
 };
 
+class Detriangulator
+{
+public:
+    // 三角形 indices の連続した出力順から、復元可能なポリゴンをまとめる。
+    VtArray<int> counts;
+    VtArray<int> indices;
+
+    bool Detriangulate(std::span<const int> triangleIndices);
+    void Clear();
+};
+
 
 // インデックスを作り直す。
 // 独立したインデックスを持つ頂点要素やインデックス展開された頂点要素を、単一のインデックスに統合する。
