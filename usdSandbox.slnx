@@ -6,6 +6,7 @@
   <Folder Name="/tests/">
     <Project Path="src/istGltf/testGltf.vcxproj" Id="cb452533-cb61-4a92-a329-21346aa6913b" />
     <Project Path="src/test/test.vcxproj" Id="0089ae0e-e430-4217-90be-61e3a55cd34d" />
+    <Project Path="src/test/testFastBounds.vcxproj" Id="49f51916-d90a-4e66-9d8f-e63dda415c10" />
   </Folder>
   <Project Path="src/istAssetDatabase/istAssetDatabase.vcxproj" Id="4b2f9a3d-7e61-4c98-9d1a-52e38c10b7f4" />
   <Project Path="src/istGltf/istGltf.vcxproj" Id="b3c274a4-4c9e-4e16-96c8-9725d593e052" />

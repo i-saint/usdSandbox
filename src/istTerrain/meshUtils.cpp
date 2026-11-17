@@ -57,6 +57,16 @@ GfRange3f FastBounds(std::span<const GfVec3f> points)
     return bounds;
 }
 
+class MeshRefiner::IAttribute
+{
+public:
+    virtual ~IAttribute() = default;
+    virtual void Prepare(int vertexCount, int indexCount) = 0;
+    virtual bool Compare(int vertexIndex, int indexIndex) const = 0;
+    virtual void Emit(int indexIndex) = 0;
+    virtual void Clear() = 0;
+};
+
 template<class T>
 class MeshRefiner::IndexedAttribute final : public MeshRefiner::IAttribute
 {
@@ -188,8 +198,15 @@ void MeshRefiner::Refine()
     old2newIndices.resize(sourceIndices.size());
     std::fill(old2newIndices.begin(), old2newIndices.end(), -1);
 
-    std::vector<std::vector<int>> vertexToNew;
-    vertexToNew.resize(points.size());
+    std::vector<size_t> candidateCounts(points.size(), 0);
+    for (int vi : sourceIndices) {
+        if (vi >= 0 && static_cast<size_t>(vi) < points.size())
+            ++candidateCounts[vi];
+    }
+    std::vector<size_t> candidateOffsets(points.size() + 1, 0);
+    std::partial_sum(candidateCounts.begin(), candidateCounts.end(), candidateOffsets.begin() + 1);
+    std::vector<int> vertexToNew(candidateOffsets.back());
+    std::fill(candidateCounts.begin(), candidateCounts.end(), 0);
 
     newCounts = counts;
     newIndices.reserve(sourceIndices.size());
@@ -203,8 +220,9 @@ void MeshRefiner::Refine()
         }
 
         int newIndex = -1;
-        auto& candidates = vertexToNew[vi];
-        for (int ni : candidates) {
+        const size_t candidateOffset = candidateOffsets[vi];
+        for (size_t candidate = 0; candidate < candidateCounts[vi]; ++candidate) {
+            const int ni = vertexToNew[candidateOffset + candidate];
             bool match = true;
             for (const auto& attribute : attributes) {
                 if (!attribute->Compare(ni, static_cast<int>(ii))) {
@@ -222,7 +240,7 @@ void MeshRefiner::Refine()
             newIndex = static_cast<int>(newPoints.size());
             newPoints.push_back(points[vi]);
             new2oldPoints.push_back(vi);
-            candidates.push_back(newIndex);
+            vertexToNew[candidateOffset + candidateCounts[vi]++] = newIndex;
             for (auto& attribute : attributes) {
                 attribute->Emit(static_cast<int>(ii));
             }

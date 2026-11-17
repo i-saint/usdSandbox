@@ -66,21 +66,9 @@ public:
     void Clear();
 
 private:
-    class IAttribute
-    {
-    public:
-        virtual ~IAttribute() = default;
-        virtual void Prepare(int vertexCount, int indexCount) = 0;
-        virtual bool Compare(int vertexIndex, int indexIndex) const = 0;
-        virtual void Emit(int indexIndex) = 0;
-        virtual void Clear() = 0;
-    };
-
-    template<class T>
-    class IndexedAttribute;
-
-    template<class T>
-    class ExpandedAttribute;
+    class IAttribute;
+    template<class T> class IndexedAttribute;
+    template<class T> class ExpandedAttribute;
 
     std::vector<std::unique_ptr<IAttribute>> attributes;
 };
