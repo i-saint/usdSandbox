@@ -1,0 +1,83 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{B3C274A4-4C9E-4E16-96C8-9725D593E052}</ProjectGuid>
+    <RootNamespace>istGltf</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="..\usd.props" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\..\_bin\$(Platform)_$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\_tmp\$(Platform)_$(Configuration)_$(ProjectName)\</IntDir>
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <DisableSpecificWarnings>4244;4273;4305;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <AdditionalOptions>/utf-8 /Zc:inline- %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="istGltfFileFormat.cpp" />
+    <ClCompile Include="..\istTerrain\meshUtils.cpp" />
+    <None Include="plugInfo.json" />
+    <ProjectReference Include="..\setup\setup.vcxproj">
+      <Project>{9B9E8926-2BA4-46F2-94F3-EBB3C2867A24}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyGltfPluginMetadata" AfterTargets="Build">
+    <MakeDir Directories="$(OutDir)istGltf" />
+    <ReadLinesFromFile File="$(ProjectDir)plugInfo.json">
+      <Output TaskParameter="Lines" ItemName="GltfPluginMetadata" />
+    </ReadLinesFromFile>
+    <WriteLinesToFile File="$(OutDir)istGltf\plugInfo.json" Lines="@(GltfPluginMetadata)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+  <Target Name="CopyUsdRuntime" AfterTargets="Build" Condition="Exists('$(UsdSdkRoot)\lib\usd_ms.dll')">
+    <ItemGroup>
+      <UsdRuntimeDll Include="$(UsdSdkRoot)\lib\usd_ms.dll" />
+      <UsdRuntimeDll Include="$(UsdSdkRoot)\bin\*.dll" />
+      <UsdRuntimeDll Include="$(UsdSdkRoot)\python\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UsdRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="ValidateUsdPythonHeaders" BeforeTargets="ClCompile">
+    <Error Condition="!Exists('$(PythonIncludeDir)\pyconfig.h')" Text="USD 26.11.1 requires Python 3.14 development headers. Set PythonIncludeDir to the Python 3.14 include directory." />
+  </Target>
+</Project>

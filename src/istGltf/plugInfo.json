@@ -1,0 +1,26 @@
+﻿{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "UsdGltfFileFormat": {
+                        "bases": ["SdfFileFormat"],
+                        "displayName": "glTF Mesh Import and Export",
+                        "extensions": ["gltf", "glb"],
+                        "formatId": "istGltf",
+                        "primary": true,
+                        "supportsReading": true,
+                        "supportsEditing": false,
+                        "supportsWriting": true,
+                        "target": "usd"
+                    }
+                }
+            },
+            "LibraryPath": "../istGltf.dll",
+            "Name": "istGltf",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "library"
+        }
+    ]
+}
