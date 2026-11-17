@@ -59,7 +59,13 @@ function prepareShading(model: THREE.Object3D) {
     if (object instanceof THREE.Mesh) meshes.push(object)
   })
   if (meshes.length === 0) return
-  const wireMaterial = new THREE.MeshBasicMaterial({ color: 0x60a5fa, wireframe: true })
+  const wireMaterial = new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.1,
+    depthWrite: false,
+  })
   for (const mesh of meshes) {
     const overlay = new THREE.Mesh(mesh.geometry, wireMaterial)
     overlay.visible = false
@@ -83,6 +89,15 @@ watch(shadingMode, (mode) => {
   updateShadingMode()
   localStorage.setItem(STORAGE_KEY_SHADING_MODE, mode)
 })
+
+function disposeRenderer() {
+  if (!renderer) return
+  renderer.setAnimationLoop(null)
+  renderer.dispose()
+  renderer.forceContextLoss()
+  renderer.domElement.remove()
+  renderer = undefined
+}
 
 function disposeModel(model: THREE.Object3D) {
   const geometries = new Set<THREE.BufferGeometry>()
@@ -110,7 +125,6 @@ function disposeModel(model: THREE.Object3D) {
 
 function releaseViewer() {
   observer?.disconnect()
-  renderer?.setAnimationLoop(null)
   controls?.dispose()
   for (const { mesh, material } of shadedMeshes) mesh.material = material
   shadedMeshes.length = 0
@@ -120,11 +134,13 @@ function releaseViewer() {
     scene.clear()
     scene = undefined
   }
-  renderer?.dispose()
-  renderer?.forceContextLoss()
-  renderer?.domElement.remove()
-  renderer = undefined
+  disposeRenderer()
   controls = undefined
+}
+
+function showPreviewError(error: unknown) {
+  errorMessage.value = error instanceof Error ? error.message : String(error)
+  releaseViewer()
 }
 
 async function initialize() {
@@ -137,7 +153,7 @@ async function initialize() {
     const host = viewport.value
     renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    renderer.setClearColor(0x14161a)
+    renderer.setClearColor(0x333333)
     host.appendChild(renderer.domElement)
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000)
     scene = new THREE.Scene()
@@ -145,7 +161,7 @@ async function initialize() {
     const light = new THREE.DirectionalLight(0xffffff, 3)
     light.position.set(3, 5, 4)
     scene.add(light)
-    controls = new OrbitControls(camera, renderer.domElement)
+    controls = new OrbitControls(camera, host)
     controls.enableDamping = true
 
     const resize = () => {
@@ -196,10 +212,7 @@ async function initialize() {
     controls.target.set(0, 0, 0)
     controls.update()
   } catch (error) {
-    if (!disposed) {
-      errorMessage.value = error instanceof Error ? error.message : String(error)
-      releaseViewer()
-    }
+    if (!disposed) showPreviewError(error)
   } finally {
     loading.value = false
   }
@@ -276,7 +289,7 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #14161a;
+  background: #333333;
 }
 
 .preview-viewport :deep(canvas) {
