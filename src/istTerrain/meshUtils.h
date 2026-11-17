@@ -24,8 +24,8 @@ struct MeshData
     VtArray<int> counts;
     VtArray<GfVec3f> points;
 
-    PrimvarData<GfVec3f> normals, binormals, tangents;
-    PrimvarData<GfVec4f> colors;
+    PrimvarData<GfVec3f> normals, binormals;
+    PrimvarData<GfVec4f> tangents, colors;
     PrimvarData<GfVec2f> uvs[kMaxUvSets];
 
     VtArray<int> jointIndices;

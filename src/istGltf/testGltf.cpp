@@ -6,6 +6,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/metrics.h"
+#include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/xform.h"
 
 #define CGLTF_IMPLEMENTATION
@@ -151,6 +152,67 @@ static bool TestImportScene(const SdfFileFormatConstPtr& format, const std::file
     return ok;
 }
 
+static bool TestVertexAttributes(const SdfFileFormatConstPtr& format)
+{
+    const auto stage = UsdStage::CreateInMemory();
+    auto parent = UsdGeomXform::Define(stage, SdfPath("/AttributeTransform"));
+    parent.AddScaleOp().Set(GfVec3f(2,1,1));
+    auto mesh = UsdGeomMesh::Define(stage, SdfPath("/AttributeTransform/AttributeMesh"));
+    mesh.CreatePointsAttr().Set(VtVec3fArray{ GfVec3f(0,0,0), GfVec3f(1,0,0), GfVec3f(1,1,0), GfVec3f(0,1,0) });
+    mesh.CreateFaceVertexCountsAttr().Set(VtIntArray{ 3, 3 });
+    mesh.CreateFaceVertexIndicesAttr().Set(VtIntArray{ 0,1,2, 0,2,3 });
+    mesh.CreateNormalsAttr().Set(VtVec3fArray(4, GfVec3f(1,1,1)));
+    mesh.SetNormalsInterpolation(UsdGeomTokens->vertex);
+    UsdGeomPrimvarsAPI primvars(mesh);
+    UsdGeomPrimvar tangent = primvars.CreatePrimvar(TfToken("tangents"), SdfValueTypeNames->Float4Array, UsdGeomTokens->vertex);
+    tangent.Set(VtVec4fArray(4, GfVec4f(1,0,0,1)));
+    UsdGeomPrimvar uv0 = primvars.CreatePrimvar(TfToken("st"), SdfValueTypeNames->TexCoord2fArray, UsdGeomTokens->faceVarying);
+    uv0.Set(VtVec2fArray{ GfVec2f(0,0), GfVec2f(1,0), GfVec2f(1,1), GfVec2f(0.5f,0.5f), GfVec2f(1,1), GfVec2f(0,1) });
+    UsdGeomPrimvar uv1 = primvars.CreatePrimvar(TfToken("st1"), SdfValueTypeNames->TexCoord2fArray, UsdGeomTokens->vertex);
+    uv1.Set(VtVec2fArray{ GfVec2f(0,0), GfVec2f(1,0), GfVec2f(1,1), GfVec2f(0,1) });
+
+    std::string text;
+    if (!Check(format->WriteToString(*stage->GetRootLayer(), &text), "attribute export failed")) return false;
+    cgltf_options options{};
+    cgltf_data* data = nullptr;
+    if (!Check(cgltf_parse(&options, text.data(), text.size(), &data) == cgltf_result_success, "attribute output parse failed")) return false;
+    const bool buffersLoaded = cgltf_load_buffers(&options, data, nullptr) == cgltf_result_success;
+    const cgltf_primitive& primitive = data->meshes[0].primitives[0];
+    const cgltf_accessor* position = cgltf_find_accessor(&primitive, cgltf_attribute_type_position, 0);
+    const cgltf_accessor* normal = cgltf_find_accessor(&primitive, cgltf_attribute_type_normal, 0);
+    const cgltf_accessor* tangentAccessor = cgltf_find_accessor(&primitive, cgltf_attribute_type_tangent, 0);
+    const cgltf_accessor* texcoord0 = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, 0);
+    const cgltf_accessor* texcoord1 = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, 1);
+    const bool outputValid = Check(buffersLoaded && cgltf_validate(data) == cgltf_result_success, "attribute output buffers invalid")
+        && Check(position && position->count == 5 && primitive.indices->count == 6, "face-varying UV seam was not split")
+        && Check(normal && tangentAccessor && texcoord0 && texcoord1 && normal->count == position->count
+            && tangentAccessor->count == position->count && texcoord0->count == position->count && texcoord1->count == position->count,
+            "glTF vertex attributes missing or mismatched");
+    cgltf_free(data);
+    if (!outputValid) return false;
+
+    SdfLayerRefPtr imported = SdfLayer::CreateAnonymous("attribute-import.usda");
+    if (!Check(format->ReadFromString(imported.operator->(), text), "attribute import failed")) return false;
+    UsdStageRefPtr importedStage = UsdStage::Open(imported);
+    UsdGeomMesh importedMesh(importedStage->GetPrimAtPath(SdfPath("/Mesh_0")));
+    VtVec3fArray normals;
+    VtVec4fArray tangents;
+    VtVec2fArray importedUv0, importedUv1;
+    UsdGeomPrimvarsAPI importedPrimvars(importedMesh);
+    const UsdGeomPrimvar importedTangent = importedPrimvars.GetPrimvar(TfToken("tangents"));
+    const UsdGeomPrimvar importedSt = importedPrimvars.GetPrimvar(TfToken("st"));
+    const UsdGeomPrimvar importedSt1 = importedPrimvars.GetPrimvar(TfToken("st1"));
+    VtVec3fArray points;
+    return Check(importedMesh && importedMesh.GetPointsAttr().Get(&points) && importedMesh.GetNormalsAttr().Get(&normals)
+        && importedMesh.GetNormalsInterpolation() == UsdGeomTokens->vertex, "imported normals missing or mis-interpolated")
+        && Check(importedTangent.Get(&tangents) && importedSt.Get(&importedUv0) && importedSt1.Get(&importedUv1), "imported tangent or UV primvars missing")
+        && Check(points.size() == 5 && normals.size() == points.size() && tangents.size() == points.size()
+            && importedUv0.size() == points.size() && importedUv1.size() == points.size(), "imported attributes have incorrect counts")
+        && Check(GfIsClose(normals[0], GfVec3f(1.0f / 3.0f, 2.0f / 3.0f, 2.0f / 3.0f), 1e-5)
+            && tangents[0] == GfVec4f(1,0,0,1) && importedUv0[0] == GfVec2f(0,0) && importedUv1[0] == GfVec2f(0,0),
+            "imported attribute values incorrect");
+}
+
 static bool TestMeshProcessing(const SdfFileFormatConstPtr& format)
 {
     const auto stage = UsdStage::CreateInMemory();
@@ -213,6 +275,7 @@ int main(int argc, char** argv)
     const auto format = SdfFileFormat::FindByExtension("gltf");
     const auto binaryFormat = SdfFileFormat::FindByExtension("glb");
     std::string text;
+    if (ok) ok = TestVertexAttributes(format) && TestVertexAttributes(binaryFormat);
     if (ok) ok = TestMeshProcessing(format);
     if (ok) ok = TestMeshProcessing(binaryFormat);
     if (ok) {

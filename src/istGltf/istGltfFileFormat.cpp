@@ -9,6 +9,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/metrics.h"
+#include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 
 #define CGLTF_IMPLEMENTATION
@@ -128,31 +129,66 @@ uint32_t ReadUnsigned(const uint8_t* p, cgltf_component_type type)
     uint32_t v; std::memcpy(&v, p, sizeof(v)); return v;
 }
 
-bool ReadPositions(const cgltf_accessor& accessor, std::vector<float>& values)
+float ReadFloatComponent(const uint8_t* p, cgltf_component_type type, bool normalized)
 {
-    if (accessor.type != cgltf_type_vec3 || accessor.component_type != cgltf_component_type_r_32f ||
-        accessor.count == 0 || accessor.count > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+    if (type == cgltf_component_type_r_32f) {
+        float value;
+        std::memcpy(&value, p, sizeof(value));
+        return value;
+    }
+    const uint32_t value = ReadUnsigned(p, type);
+    if (!normalized) return static_cast<float>(value);
+    if (type == cgltf_component_type_r_8u) return static_cast<float>(value) / 255.0f;
+    return static_cast<float>(value) / 65535.0f;
+}
+
+bool ReadFloatAttribute(const cgltf_accessor& accessor, cgltf_type type, size_t expectedCount,
+    bool allowNormalizedUnsigned, std::vector<float>& values)
+{
+    const size_t components = cgltf_num_components(type);
+    const bool floatComponents = accessor.component_type == cgltf_component_type_r_32f;
+    const bool normalizedUnsigned = allowNormalizedUnsigned && accessor.normalized &&
+        (accessor.component_type == cgltf_component_type_r_8u || accessor.component_type == cgltf_component_type_r_16u);
+    if (accessor.type != type || accessor.count != expectedCount || accessor.count == 0 ||
+        accessor.count > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        (!floatComponents && !normalizedUnsigned) ||
         (accessor.buffer_view && accessor.buffer_view->has_meshopt_compression)) return false;
-    values.resize(accessor.count * 3);
+
+    values.resize(accessor.count * components);
     cgltf_accessor base = accessor;
     base.is_sparse = false;
-    if (cgltf_accessor_unpack_floats(&base, values.data(), values.size()) != values.size()) return false;
+    if (accessor.buffer_view) {
+        if (cgltf_accessor_unpack_floats(&base, values.data(), values.size()) != values.size()) return false;
+    }
+    else if (!accessor.is_sparse) return false;
+
     if (accessor.is_sparse) {
         const auto& sparse = accessor.sparse;
-        if (!sparse.indices_buffer_view || !sparse.values_buffer_view || sparse.indices_buffer_view->has_meshopt_compression || sparse.values_buffer_view->has_meshopt_compression) return false;
+        if (!sparse.indices_buffer_view || !sparse.values_buffer_view ||
+            sparse.indices_buffer_view->has_meshopt_compression || sparse.values_buffer_view->has_meshopt_compression) return false;
         const uint8_t* indices = cgltf_buffer_view_data(sparse.indices_buffer_view);
         const uint8_t* data = cgltf_buffer_view_data(sparse.values_buffer_view);
         if (!indices || !data) return false;
         indices += sparse.indices_byte_offset;
         data += sparse.values_byte_offset;
-        const size_t stride = cgltf_component_size(sparse.indices_component_type);
+        const size_t indexStride = cgltf_component_size(sparse.indices_component_type);
+        const size_t componentSize = cgltf_component_size(accessor.component_type);
         for (size_t i = 0; i < sparse.count; ++i) {
-            const uint32_t index = ReadUnsigned(indices + i * stride, sparse.indices_component_type);
+            const uint32_t index = ReadUnsigned(indices + i * indexStride, sparse.indices_component_type);
             if (index >= accessor.count) return false;
-            std::memcpy(values.data() + index * 3, data + i * 3 * sizeof(float), 3 * sizeof(float));
+            for (size_t component = 0; component < components; ++component) {
+                values[index * components + component] = ReadFloatComponent(
+                    data + (i * components + component) * componentSize, accessor.component_type, accessor.normalized);
+            }
         }
     }
     return true;
+}
+
+bool ReadPositions(const cgltf_accessor& accessor, std::vector<float>& values)
+{
+    return accessor.component_type == cgltf_component_type_r_32f &&
+        ReadFloatAttribute(accessor, cgltf_type_vec3, accessor.count, false, values);
 }
 
 bool ReadIndices(const cgltf_accessor& accessor, std::vector<uint32_t>& values)
@@ -231,6 +267,54 @@ bool ImportPrimitive(const cgltf_primitive& primitive, const cgltf_node& node, b
         TF_RUNTIME_ERROR("Non-finite glTF node transform");
         return false;
     }
+    const cgltf_accessor* normal = cgltf_find_accessor(&primitive, cgltf_attribute_type_normal, 0);
+    const cgltf_accessor* tangent = cgltf_find_accessor(&primitive, cgltf_attribute_type_tangent, 0);
+    const cgltf_accessor* texcoord0 = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, 0);
+    const cgltf_accessor* texcoord1 = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, 1);
+    std::vector<float> normalValues, tangentValues, uv0Values, uv1Values;
+    if ((normal && !ReadFloatAttribute(*normal, cgltf_type_vec3, position->count, false, normalValues)) ||
+        (tangent && !ReadFloatAttribute(*tangent, cgltf_type_vec4, position->count, false, tangentValues)) ||
+        (texcoord0 && !ReadFloatAttribute(*texcoord0, cgltf_type_vec2, position->count, true, uv0Values)) ||
+        (texcoord1 && !ReadFloatAttribute(*texcoord1, cgltf_type_vec2, position->count, true, uv1Values))) {
+        TF_RUNTIME_ERROR("Invalid or unsupported glTF vertex attribute accessor");
+        return false;
+    }
+    if (determinant == 0.0f && normal) {
+        TF_RUNTIME_ERROR("Cannot transform glTF normals through a singular node transform");
+        return false;
+    }
+    for (size_t i = 0; i < normalValues.size(); i += 3) {
+        const float x = normalValues[i], y = normalValues[i + 1], z = normalValues[i + 2];
+        normalValues[i] = ((matrix[5] * matrix[10] - matrix[9] * matrix[6]) * x + (matrix[9] * matrix[2] - matrix[1] * matrix[10]) * y + (matrix[1] * matrix[6] - matrix[5] * matrix[2]) * z) / determinant;
+        normalValues[i + 1] = ((matrix[8] * matrix[6] - matrix[4] * matrix[10]) * x + (matrix[0] * matrix[10] - matrix[8] * matrix[2]) * y + (matrix[4] * matrix[2] - matrix[0] * matrix[6]) * z) / determinant;
+        normalValues[i + 2] = ((matrix[4] * matrix[9] - matrix[8] * matrix[5]) * x + (matrix[8] * matrix[1] - matrix[0] * matrix[9]) * y + (matrix[0] * matrix[5] - matrix[4] * matrix[1]) * z) / determinant;
+        const float length = std::sqrt(normalValues[i] * normalValues[i] + normalValues[i + 1] * normalValues[i + 1] + normalValues[i + 2] * normalValues[i + 2]);
+        if (!std::isfinite(length) || length <= 0.0f) {
+            TF_RUNTIME_ERROR("Invalid transformed glTF normal");
+            return false;
+        }
+        for (size_t component = 0; component < 3; ++component) normalValues[i + component] /= length;
+    }
+    for (size_t i = 0; i < tangentValues.size(); i += 4) {
+        const float x = tangentValues[i], y = tangentValues[i + 1], z = tangentValues[i + 2];
+        tangentValues[i] = matrix[0] * x + matrix[4] * y + matrix[8] * z;
+        tangentValues[i + 1] = matrix[1] * x + matrix[5] * y + matrix[9] * z;
+        tangentValues[i + 2] = matrix[2] * x + matrix[6] * y + matrix[10] * z;
+        const float length = std::sqrt(tangentValues[i] * tangentValues[i] + tangentValues[i + 1] * tangentValues[i + 1] + tangentValues[i + 2] * tangentValues[i + 2]);
+        if (!std::isfinite(length) || length <= 0.0f) {
+            TF_RUNTIME_ERROR("Invalid transformed glTF tangent");
+            return false;
+        }
+        for (size_t component = 0; component < 3; ++component) tangentValues[i + component] /= length;
+        if (determinant < 0.0f) tangentValues[i + 3] = -tangentValues[i + 3];
+    }
+    auto finiteValues = [](const std::vector<float>& values) {
+        return std::all_of(values.begin(), values.end(), [](float value) { return std::isfinite(value); });
+    };
+    if (!finiteValues(normalValues) || !finiteValues(tangentValues) || !finiteValues(uv0Values) || !finiteValues(uv1Values)) {
+        TF_RUNTIME_ERROR("Non-finite glTF vertex attribute");
+        return false;
+    }
     VtVec3fArray points(position->count);
     for (size_t i = 0; i < points.size(); ++i) {
         const float x = values[i * 3], y = values[i * 3 + 1], z = values[i * 3 + 2];
@@ -281,6 +365,40 @@ bool ImportPrimitive(const cgltf_primitive& primitive, const cgltf_node& node, b
         TF_RUNTIME_ERROR("Failed to create USD mesh '%s'", path.GetText());
         return false;
     }
+    if (normal) {
+        VtVec3fArray values(position->count);
+        for (size_t i = 0; i < values.size(); ++i) values[i] = GfVec3f(normalValues[i * 3], normalValues[i * 3 + 1], normalValues[i * 3 + 2]);
+        if (!mesh.CreateNormalsAttr().Set(values)) {
+            TF_RUNTIME_ERROR("Failed to create USD mesh normals '%s'", path.GetText());
+            return false;
+        }
+        mesh.SetNormalsInterpolation(UsdGeomTokens->vertex);
+    }
+    UsdGeomPrimvarsAPI primvars(mesh);
+    auto setPrimvar = [&](const char* name, const SdfValueTypeName& type, const std::vector<float>& source, size_t components) {
+        if (source.empty()) return true;
+        UsdGeomPrimvar primvar = primvars.CreatePrimvar(TfToken(name), type, UsdGeomTokens->vertex);
+        if (!primvar) return false;
+        if (components == 4) {
+            VtVec4fArray values(position->count);
+            for (size_t i = 0; i < values.size(); ++i) values[i] = GfVec4f(source[i * 4], source[i * 4 + 1], source[i * 4 + 2], source[i * 4 + 3]);
+            return primvar.Set(values);
+        }
+        if (components == 3) {
+            VtVec3fArray values(position->count);
+            for (size_t i = 0; i < values.size(); ++i) values[i] = GfVec3f(source[i * 3], source[i * 3 + 1], source[i * 3 + 2]);
+            return primvar.Set(values);
+        }
+        VtVec2fArray values(position->count);
+        for (size_t i = 0; i < values.size(); ++i) values[i] = GfVec2f(source[i * 2], source[i * 2 + 1]);
+        return primvar.Set(values);
+    };
+    if (!setPrimvar("tangents", SdfValueTypeNames->Float4Array, tangentValues, 4) ||
+        !setPrimvar("st", SdfValueTypeNames->TexCoord2fArray, uv0Values, 2) ||
+        !setPrimvar("st1", SdfValueTypeNames->TexCoord2fArray, uv1Values, 2)) {
+        TF_RUNTIME_ERROR("Failed to create USD mesh primvars '%s'", path.GetText());
+        return false;
+    }
     return true;
 }
 
@@ -328,24 +446,158 @@ struct ExportMesh
 {
     std::string name;
     std::vector<float> positions;
+    std::vector<float> normals;
+    std::vector<float> tangents;
+    std::vector<float> uv0;
+    std::vector<float> uv1;
     std::vector<uint32_t> indices;
     float min[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
     float max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
 };
 
+template<class T>
+bool ReadPrimvarValues(const UsdGeomPrimvar& primvar, VtArray<T>& values)
+{
+    VtArray<T> authored;
+    if (!primvar.Get(&authored)) return false;
+    if (!primvar.IsIndexed()) {
+        values = std::move(authored);
+        return true;
+    }
+    VtIntArray indices;
+    if (!primvar.GetIndices(&indices)) return false;
+    values.reserve(indices.size());
+    for (int index : indices) {
+        if (index < 0 || static_cast<size_t>(index) >= authored.size()) return false;
+        values.push_back(authored[index]);
+    }
+    return true;
+}
+
+template<class T>
+bool SetMeshAttribute(const UsdGeomMesh& mesh, const MeshData& source, const VtArray<T>& values,
+    const TfToken& interpolation, PrimvarData<T>& result, bool& requiresRefine)
+{
+    if (values.empty()) return true;
+    if (interpolation == UsdGeomTokens->vertex || interpolation == UsdGeomTokens->varying) {
+        if (values.size() != source.points.size()) return false;
+        result.values = values;
+        result.indices = source.indices;
+        return true;
+    }
+
+    requiresRefine = true;
+    VtIntArray counts, holes;
+    if (!mesh.GetFaceVertexCountsAttr().Get(&counts)) return false;
+    mesh.GetHoleIndicesAttr().Get(&holes);
+    std::unordered_set<int> holeSet(holes.begin(), holes.end());
+    if (interpolation == UsdGeomTokens->faceVarying) {
+        size_t total = 0;
+        for (int count : counts) total += static_cast<size_t>(count);
+        if (values.size() != total) return false;
+        size_t offset = 0;
+        for (size_t face = 0; face < counts.size(); ++face) {
+            const size_t count = static_cast<size_t>(counts[face]);
+            if (!holeSet.contains(static_cast<int>(face)))
+                result.values.insert(result.values.end(), values.begin() + offset, values.begin() + offset + count);
+            offset += count;
+        }
+        return result.values.size() == source.indices.size();
+    }
+    if (interpolation == UsdGeomTokens->uniform) {
+        if (values.size() != counts.size()) return false;
+        for (size_t face = 0; face < counts.size(); ++face) {
+            if (!holeSet.contains(static_cast<int>(face)))
+                result.values.insert(result.values.end(), static_cast<size_t>(counts[face]), values[face]);
+        }
+        return result.values.size() == source.indices.size();
+    }
+    if (interpolation == UsdGeomTokens->constant) {
+        if (values.size() != 1) return false;
+        result.values.assign(source.indices.size(), values[0]);
+        return true;
+    }
+    return false;
+}
+
+bool LoadMeshPrimvar(const UsdGeomMesh& mesh, const MeshData& source, const UsdGeomPrimvar& primvar,
+    PrimvarData<GfVec2f>& result, bool& requiresRefine)
+{
+    if (!primvar) return true;
+    VtVec2fArray values;
+    if (!ReadPrimvarValues(primvar, values) || !SetMeshAttribute(mesh, source, values, primvar.GetInterpolation(), result, requiresRefine)) {
+        TF_RUNTIME_ERROR("Invalid mesh primvar '%s' on '%s'", primvar.GetPrimvarName().GetText(), mesh.GetPath().GetText());
+        return false;
+    }
+    return true;
+}
+
 bool CollectMesh(const UsdGeomMesh& mesh, UsdGeomXformCache& cache, double metersPerUnit,
     bool zUp, ExportMesh& result)
 {
-    MeshData source, triangles;
+    MeshData source, triangles, refined;
     if (!ExtractMeshData(mesh, source))
         return false;
     if (source.counts.empty())
         return true;
+
+    bool requiresRefine = false;
+    VtVec3fArray normals;
+    if (!mesh.GetNormalsAttr().Get(&normals) && mesh.GetNormalsAttr().HasAuthoredValueOpinion()) {
+        TF_RUNTIME_ERROR("Unable to read mesh normals on '%s'", mesh.GetPath().GetText());
+        return false;
+    }
+    if (!normals.empty() && !SetMeshAttribute(mesh, source, normals, mesh.GetNormalsInterpolation(), source.normals, requiresRefine)) {
+        TF_RUNTIME_ERROR("Invalid mesh normals on '%s'", mesh.GetPath().GetText());
+        return false;
+    }
+    UsdGeomPrimvarsAPI primvars(mesh);
+    UsdGeomPrimvar tangents = primvars.GetPrimvar(TfToken("tangents"));
+    if (tangents) {
+        if (tangents.GetTypeName() == SdfValueTypeNames->Float4Array) {
+            VtVec4fArray values;
+            if (!ReadPrimvarValues(tangents, values) || !SetMeshAttribute(mesh, source, values, tangents.GetInterpolation(), source.tangents, requiresRefine)) {
+                TF_RUNTIME_ERROR("Invalid mesh tangents on '%s'", mesh.GetPath().GetText());
+                return false;
+            }
+        }
+        else if (tangents.GetTypeName() == SdfValueTypeNames->Vector3fArray) {
+            VtVec3fArray values;
+            if (!ReadPrimvarValues(tangents, values)) {
+                TF_RUNTIME_ERROR("Unable to read mesh tangents on '%s'", mesh.GetPath().GetText());
+                return false;
+            }
+            VtVec4fArray expanded;
+            expanded.reserve(values.size());
+            for (const GfVec3f& value : values) expanded.push_back(GfVec4f(value[0], value[1], value[2], 1.0f));
+            if (!SetMeshAttribute(mesh, source, expanded, tangents.GetInterpolation(), source.tangents, requiresRefine)) {
+                TF_RUNTIME_ERROR("Invalid mesh tangents on '%s'", mesh.GetPath().GetText());
+                return false;
+            }
+        }
+        else {
+            TF_RUNTIME_ERROR("Unsupported tangent type on '%s'", mesh.GetPath().GetText());
+            return false;
+        }
+    }
+    UsdGeomPrimvar uv0 = primvars.GetPrimvar(TfToken("st"));
+    if (!uv0) uv0 = primvars.GetPrimvar(TfToken("uv"));
+    UsdGeomPrimvar uv1 = primvars.GetPrimvar(TfToken("st1"));
+    if (!uv1) uv1 = primvars.GetPrimvar(TfToken("uv1"));
+    if (!LoadMeshPrimvar(mesh, source, uv0, source.uvs[0], requiresRefine) ||
+        !LoadMeshPrimvar(mesh, source, uv1, source.uvs[1], requiresRefine))
+        return false;
+
     if (!TriangulateMesh(source, triangles)) {
         TF_RUNTIME_ERROR("Unable to triangulate mesh '%s'", mesh.GetPath().GetText());
         return false;
     }
-    const auto& points = triangles.points;
+    if (requiresRefine && !RefineMesh(triangles, refined)) {
+        TF_RUNTIME_ERROR("Unable to refine mesh '%s'", mesh.GetPath().GetText());
+        return false;
+    }
+    if (!requiresRefine) refined = std::move(triangles);
+    const auto& points = refined.points;
     if (points.size() > std::numeric_limits<uint32_t>::max()) {
         TF_RUNTIME_ERROR("Mesh '%s' has too many points for glTF", mesh.GetPath().GetText());
         return false;
@@ -356,6 +608,19 @@ bool CollectMesh(const UsdGeomMesh& mesh, UsdGeomXformCache& cache, double meter
     const bool reverse = (orientation == UsdGeomTokens->leftHanded) != (transform.GetDeterminant3() < 0.0);
     result.name = mesh.GetPrim().GetName().GetString();
     result.positions.reserve(points.size() * 3);
+    auto appendVector = [&](std::vector<float>& target, const GfVec3d& vector) {
+        GfVec3d value = vector;
+        if (zUp) value = GfVec3d(value[0], value[2], -value[1]);
+        const double length = value.GetLength();
+        if (!std::isfinite(length) || length <= 0.0) return false;
+        value /= length;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float component = static_cast<float>(value[axis]);
+            if (!std::isfinite(component)) return false;
+            target.push_back(component);
+        }
+        return true;
+    };
     for (const GfVec3f& point : points) {
         GfVec3d p = transform.Transform(GfVec3d(point[0], point[1], point[2])) * metersPerUnit;
         if (zUp)
@@ -371,11 +636,53 @@ bool CollectMesh(const UsdGeomMesh& mesh, UsdGeomXformCache& cache, double meter
             result.max[axis] = std::max(result.max[axis], value);
         }
     }
-    result.indices.reserve(triangles.indices.size());
-    for (size_t i = 0; i < triangles.indices.size(); i += 3) {
-        result.indices.push_back(static_cast<uint32_t>(triangles.indices[i]));
-        result.indices.push_back(static_cast<uint32_t>(triangles.indices[i + (reverse ? 2 : 1)]));
-        result.indices.push_back(static_cast<uint32_t>(triangles.indices[i + (reverse ? 1 : 2)]));
+    if (!refined.normals.values.empty()) {
+        if (refined.normals.values.size() != points.size() || transform.GetDeterminant3() == 0.0) {
+            TF_RUNTIME_ERROR("Cannot transform mesh normals through a singular transform on '%s'", mesh.GetPath().GetText());
+            return false;
+        }
+        const GfMatrix4d normalTransform = transform.GetInverse().GetTranspose();
+        for (const GfVec3f& value : refined.normals.values) {
+            if (!appendVector(result.normals, normalTransform.TransformDir(GfVec3d(value)))) {
+                TF_RUNTIME_ERROR("Invalid transformed normal on '%s'", mesh.GetPath().GetText());
+                return false;
+            }
+        }
+    }
+    if (!refined.tangents.values.empty()) {
+        if (refined.tangents.values.size() != points.size()) {
+            TF_RUNTIME_ERROR("Mesh tangent count does not match points on '%s'", mesh.GetPath().GetText());
+            return false;
+        }
+        const float handedness = transform.GetDeterminant3() < 0.0 ? -1.0f : 1.0f;
+        for (const GfVec4f& value : refined.tangents.values) {
+            if ((value[3] != -1.0f && value[3] != 1.0f) ||
+                !appendVector(result.tangents, transform.TransformDir(GfVec3d(value[0], value[1], value[2])))) {
+                TF_RUNTIME_ERROR("Invalid transformed tangent on '%s'", mesh.GetPath().GetText());
+                return false;
+            }
+            result.tangents.push_back(value[3] * handedness);
+        }
+    }
+    auto appendUv = [&](const VtVec2fArray& values, std::vector<float>& target) {
+        if (values.empty()) return true;
+        if (values.size() != points.size()) return false;
+        for (const GfVec2f& value : values) {
+            if (!std::isfinite(value[0]) || !std::isfinite(value[1])) return false;
+            target.push_back(value[0]);
+            target.push_back(value[1]);
+        }
+        return true;
+    };
+    if (!appendUv(refined.uvs[0].values, result.uv0) || !appendUv(refined.uvs[1].values, result.uv1)) {
+        TF_RUNTIME_ERROR("Invalid transformed UVs on '%s'", mesh.GetPath().GetText());
+        return false;
+    }
+    result.indices.reserve(refined.indices.size());
+    for (size_t i = 0; i < refined.indices.size(); i += 3) {
+        result.indices.push_back(static_cast<uint32_t>(refined.indices[i]));
+        result.indices.push_back(static_cast<uint32_t>(refined.indices[i + (reverse ? 2 : 1)]));
+        result.indices.push_back(static_cast<uint32_t>(refined.indices[i + (reverse ? 1 : 2)]));
     }
     return true;
 }
@@ -413,43 +720,73 @@ bool WriteGltf(std::ostream& output, bool glb, std::vector<ExportMesh>& meshes)
     std::vector<cgltf_node> nodes(n);
     std::vector<cgltf_node*> sceneNodes(n);
     std::vector<cgltf_primitive> primitives(n);
-    std::vector<cgltf_attribute> attributes(n);
-    std::vector<cgltf_accessor> accessors(n * 2);
-    std::vector<cgltf_buffer_view> views(n * 2);
+    std::vector<cgltf_attribute> attributes;
+    std::vector<cgltf_accessor> accessors;
+    std::vector<cgltf_buffer_view> views;
+    attributes.reserve(n * 5);
+    accessors.reserve(n * 6);
+    views.reserve(n * 6);
     std::vector<uint8_t> bytes;
     cgltf_buffer buffer{};
+    auto appendFloatAccessor = [&](const std::vector<float>& values, cgltf_type type) {
+        views.emplace_back();
+        cgltf_buffer_view& view = views.back();
+        view.buffer = &buffer;
+        view.offset = bytes.size();
+        AppendBytes(bytes, values);
+        view.size = bytes.size() - view.offset;
+        accessors.emplace_back();
+        cgltf_accessor& accessor = accessors.back();
+        accessor.buffer_view = &view;
+        accessor.component_type = cgltf_component_type_r_32f;
+        accessor.type = type;
+        accessor.count = values.size() / cgltf_num_components(type);
+        return &accessor;
+    };
     for (size_t i = 0; i < n; ++i) {
         ExportMesh& src = meshes[i];
-        cgltf_buffer_view& positionsView = views[i * 2];
-        positionsView.buffer = &buffer;
-        positionsView.offset = bytes.size();
-        AppendBytes(bytes, src.positions);
-        positionsView.size = bytes.size() - positionsView.offset;
-        cgltf_buffer_view& indicesView = views[i * 2 + 1];
+        const size_t firstAttribute = attributes.size();
+        cgltf_accessor* position = appendFloatAccessor(src.positions, cgltf_type_vec3);
+        position->has_min = position->has_max = true;
+        std::copy_n(src.min, 3, position->min);
+        std::copy_n(src.max, 3, position->max);
+        attributes.emplace_back();
+        attributes.back().name = const_cast<char*>("POSITION");
+        attributes.back().type = cgltf_attribute_type_position;
+        attributes.back().data = position;
+        auto appendAttribute = [&](const char* name, cgltf_attribute_type semantic, int index,
+            const std::vector<float>& values, cgltf_type type) {
+            if (values.empty()) return;
+            cgltf_accessor* accessor = appendFloatAccessor(values, type);
+            attributes.emplace_back();
+            attributes.back().name = const_cast<char*>(name);
+            attributes.back().type = semantic;
+            attributes.back().index = index;
+            attributes.back().data = accessor;
+        };
+        appendAttribute("NORMAL", cgltf_attribute_type_normal, 0, src.normals, cgltf_type_vec3);
+        appendAttribute("TANGENT", cgltf_attribute_type_tangent, 0, src.tangents, cgltf_type_vec4);
+        appendAttribute("TEXCOORD_0", cgltf_attribute_type_texcoord, 0, src.uv0, cgltf_type_vec2);
+        appendAttribute("TEXCOORD_1", cgltf_attribute_type_texcoord, 1, src.uv1, cgltf_type_vec2);
+        const size_t attributeCount = attributes.size() - firstAttribute;
+
+        views.emplace_back();
+        cgltf_buffer_view& indicesView = views.back();
         indicesView.buffer = &buffer;
         indicesView.offset = bytes.size();
         AppendBytes(bytes, src.indices);
         indicesView.size = bytes.size() - indicesView.offset;
-
-        cgltf_accessor& position = accessors[i * 2];
-        position.buffer_view = &positionsView;
-        position.component_type = cgltf_component_type_r_32f;
-        position.type = cgltf_type_vec3;
-        position.count = src.positions.size() / 3;
-        position.has_min = position.has_max = true;
-        std::copy_n(src.min, 3, position.min);
-        std::copy_n(src.max, 3, position.max);
-        cgltf_accessor& index = accessors[i * 2 + 1];
+        accessors.emplace_back();
+        cgltf_accessor& index = accessors.back();
         index.buffer_view = &indicesView;
         index.component_type = cgltf_component_type_r_32u;
         index.type = cgltf_type_scalar;
         index.count = src.indices.size();
-        attributes[i].name = const_cast<char*>("POSITION");
-        attributes[i].data = &position;
+
         primitives[i].type = cgltf_primitive_type_triangles;
         primitives[i].indices = &index;
-        primitives[i].attributes = &attributes[i];
-        primitives[i].attributes_count = 1;
+        primitives[i].attributes = attributes.data() + firstAttribute;
+        primitives[i].attributes_count = attributeCount;
         gltfMeshes[i].name = src.name.data();
         gltfMeshes[i].primitives = &primitives[i];
         gltfMeshes[i].primitives_count = 1;
