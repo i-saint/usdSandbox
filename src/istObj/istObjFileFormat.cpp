@@ -296,50 +296,41 @@ bool UsdObjPlusFileFormat::WriteToFile(
     output << std::setprecision(std::numeric_limits<double>::max_digits10);
     UsdGeomXformCache xformCache(UsdTimeCode::Default());
     size_t vertexOffset = 0;
-    for (const UsdPrim& prim : stage->Traverse()) {
+    for (const UsdPrim& prim : UsdPrimRange::Stage(stage, UsdTraverseInstanceProxies())) {
         UsdGeomMesh mesh(prim);
         if (!mesh)
             continue;
 
-        VtVec3fArray points;
-        VtIntArray faceVertexCounts;
-        VtIntArray faceVertexIndices;
-        if (!mesh.GetPointsAttr().Get(&points)
-            || !mesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts)
-            || !mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices))
+        MeshData source, triangles;
+        if (!ExtractMeshData(mesh, source))
             return false;
-
-        size_t expectedIndexCount = 0;
-        for (int count : faceVertexCounts) {
-            if (count < 3)
-                return false;
-            expectedIndexCount += static_cast<size_t>(count);
-        }
-        if (expectedIndexCount != faceVertexIndices.size())
+        if (source.counts.empty())
+            continue;
+        if (!TriangulateMesh(source, triangles)) {
+            TF_RUNTIME_ERROR("Unable to triangulate mesh '%s'", mesh.GetPath().GetText());
             return false;
-        for (int index : faceVertexIndices) {
-            if (index < 0 || static_cast<size_t>(index) >= points.size())
-                return false;
         }
 
         const GfMatrix4d transform = xformCache.GetLocalToWorldTransform(prim);
+        TfToken orientation;
+        mesh.GetOrientationAttr().Get(&orientation);
+        const bool reverse = (orientation == UsdGeomTokens->leftHanded) != (transform.GetDeterminant3() < 0.0);
         output << "g " << prim.GetName().GetString() << '\n';
-        for (const GfVec3f& point : points) {
+        for (const GfVec3f& point : triangles.points) {
             const GfVec3d worldPoint = transform.Transform(
                 GfVec3d(point[0], point[1], point[2]));
             output << "v " << worldPoint[0] << ' ' << worldPoint[1] << ' ' << worldPoint[2] << '\n';
         }
 
-        size_t indexOffset = 0;
-        for (int count : faceVertexCounts) {
+        for (size_t i = 0; i < triangles.indices.size(); i += 3) {
             output << 'f';
-            for (int corner = 0; corner < count; ++corner) {
-                const size_t index = static_cast<size_t>(faceVertexIndices[indexOffset++]);
+            for (int corner : { 0, reverse ? 2 : 1, reverse ? 1 : 2 }) {
+                const size_t index = static_cast<size_t>(triangles.indices[i + corner]);
                 output << ' ' << vertexOffset + index + 1;
             }
             output << '\n';
         }
-        vertexOffset += points.size();
+        vertexOffset += triangles.points.size();
     }
     return output.good();
 }

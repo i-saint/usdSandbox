@@ -151,6 +151,44 @@ static bool TestImportScene(const SdfFileFormatConstPtr& format, const std::file
     return ok;
 }
 
+static bool TestMeshProcessing(const SdfFileFormatConstPtr& format)
+{
+    const auto stage = UsdStage::CreateInMemory();
+    const auto mesh = UsdGeomMesh::Define(stage, SdfPath("/TwistedQuad"));
+    mesh.CreatePointsAttr().Set(VtVec3fArray{
+        GfVec3f(0, 0, 0), GfVec3f(0, 0, 0.01f), GfVec3f(0, 1, 0.01f), GfVec3f(-1, 1, 0) });
+    mesh.CreateFaceVertexCountsAttr().Set(VtIntArray{ 4 });
+    mesh.CreateFaceVertexIndicesAttr().Set(VtIntArray{ 0, 1, 2, 3 });
+    std::string text;
+    if (!Check(format->WriteToString(*stage->GetRootLayer(), &text), "fallback triangulation failed")) return false;
+    cgltf_options options{};
+    cgltf_data* data = nullptr;
+    if (!Check(cgltf_parse(&options, text.data(), text.size(), &data) == cgltf_result_success, "fallback output parse failed")) return false;
+    bool ok = Check(cgltf_load_buffers(&options, data, nullptr) == cgltf_result_success
+        && cgltf_validate(data) == cgltf_result_success, "fallback output invalid")
+        && Check(data->meshes_count == 1 && data->meshes[0].primitives[0].indices->count == 6,
+            "fallback lost triangles");
+    if (ok) {
+        const auto* indices = data->meshes[0].primitives[0].indices;
+        const size_t expected[] = { 0, 1, 2, 2, 3, 0 };
+        for (size_t i = 0; i < 6; ++i)
+            ok = Check(cgltf_accessor_read_index(indices, i) == expected[i], "fallback indices incorrect") && ok;
+    }
+    cgltf_free(data);
+    mesh.CreateHoleIndicesAttr().Set(VtIntArray{ 0 });
+    if (ok) ok = Check(format->WriteToString(*stage->GetRootLayer(), &text) && VerifyText(text, 0),
+        "all-hole mesh was not omitted");
+    mesh.GetHoleIndicesAttr().Set(VtIntArray{ 1 });
+    text = "unchanged";
+    if (ok) ok = Check(!format->WriteToString(*stage->GetRootLayer(), &text) && text == "unchanged",
+        "invalid hole index accepted");
+    mesh.GetHoleIndicesAttr().Set(VtIntArray{});
+    mesh.GetFaceVertexCountsAttr().Set(VtIntArray{ 3 });
+    if (ok) ok = Check(!format->WriteToString(*stage->GetRootLayer(), &text) && text == "unchanged",
+        "trailing topology indices accepted");
+    return ok;
+}
+
 int main(int argc, char** argv)
 {
     if (argc != 3) return 2;
@@ -175,6 +213,8 @@ int main(int argc, char** argv)
     const auto format = SdfFileFormat::FindByExtension("gltf");
     const auto binaryFormat = SdfFileFormat::FindByExtension("glb");
     std::string text;
+    if (ok) ok = TestMeshProcessing(format);
+    if (ok) ok = TestMeshProcessing(binaryFormat);
     if (ok) {
         std::ifstream input(glb, std::ios::binary);
         const std::string fileBytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());

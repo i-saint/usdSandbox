@@ -336,22 +336,16 @@ struct ExportMesh
 bool CollectMesh(const UsdGeomMesh& mesh, UsdGeomXformCache& cache, double metersPerUnit,
     bool zUp, ExportMesh& result)
 {
-    VtVec3fArray points;
-    VtIntArray counts, indices, holes;
-    if (!mesh.GetPointsAttr().Get(&points) || !mesh.GetFaceVertexCountsAttr().Get(&counts)
-        || !mesh.GetFaceVertexIndicesAttr().Get(&indices)) {
-        TF_RUNTIME_ERROR("Missing mesh geometry on '%s'", mesh.GetPath().GetText());
+    MeshData source, triangles;
+    if (!ExtractMeshData(mesh, source))
+        return false;
+    if (source.counts.empty())
+        return true;
+    if (!TriangulateMesh(source, triangles)) {
+        TF_RUNTIME_ERROR("Unable to triangulate mesh '%s'", mesh.GetPath().GetText());
         return false;
     }
-    mesh.GetHoleIndicesAttr().Get(&holes);
-    std::unordered_set<int> holeSet;
-    for (int face : holes) {
-        if (face < 0 || static_cast<size_t>(face) >= counts.size()) {
-            TF_RUNTIME_ERROR("Invalid hole index on '%s'", mesh.GetPath().GetText());
-            return false;
-        }
-        holeSet.insert(face);
-    }
+    const auto& points = triangles.points;
     if (points.size() > std::numeric_limits<uint32_t>::max()) {
         TF_RUNTIME_ERROR("Mesh '%s' has too many points for glTF", mesh.GetPath().GetText());
         return false;
@@ -377,38 +371,11 @@ bool CollectMesh(const UsdGeomMesh& mesh, UsdGeomXformCache& cache, double meter
             result.max[axis] = std::max(result.max[axis], value);
         }
     }
-    Triangulator triangulator;
-    size_t offset = 0;
-    for (size_t face = 0; face < counts.size(); ++face) {
-        const int count = counts[face];
-        if (count < 3 || count > 46340 || static_cast<size_t>(count) > indices.size() - offset) {
-            TF_RUNTIME_ERROR("Invalid or oversized face topology on '%s'", mesh.GetPath().GetText());
-            return false;
-        }
-        const std::span<const int> polygon(indices.data() + offset, static_cast<size_t>(count));
-        for (int index : polygon) {
-            if (index < 0 || static_cast<size_t>(index) >= points.size()) {
-                TF_RUNTIME_ERROR("Invalid vertex index on '%s'", mesh.GetPath().GetText());
-                return false;
-            }
-        }
-        if (!holeSet.contains(static_cast<int>(face))) {
-            if (!triangulator.EarClipTriangulate(std::span<const GfVec3f>(points.data(), points.size()), polygon)) {
-                TF_RUNTIME_ERROR("Unable to triangulate face %zu on '%s'", face, mesh.GetPath().GetText());
-                return false;
-            }
-            const auto triangles = triangulator.GetResult();
-            for (size_t i = 0; i < triangles.size(); i += 3) {
-                result.indices.push_back(static_cast<uint32_t>(polygon[triangles[i]]));
-                result.indices.push_back(static_cast<uint32_t>(polygon[triangles[i + (reverse ? 2 : 1)]]));
-                result.indices.push_back(static_cast<uint32_t>(polygon[triangles[i + (reverse ? 1 : 2)]]));
-            }
-        }
-        offset += static_cast<size_t>(count);
-    }
-    if (offset != indices.size()) {
-        TF_RUNTIME_ERROR("Face index count mismatch on '%s'", mesh.GetPath().GetText());
-        return false;
+    result.indices.reserve(triangles.indices.size());
+    for (size_t i = 0; i < triangles.indices.size(); i += 3) {
+        result.indices.push_back(static_cast<uint32_t>(triangles.indices[i]));
+        result.indices.push_back(static_cast<uint32_t>(triangles.indices[i + (reverse ? 2 : 1)]));
+        result.indices.push_back(static_cast<uint32_t>(triangles.indices[i + (reverse ? 1 : 2)]));
     }
     return true;
 }

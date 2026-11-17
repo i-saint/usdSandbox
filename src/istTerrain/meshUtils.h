@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <pxr/base/gf/range3f.h>
+#include <pxr/usd/usdGeom/mesh.h>
 
 #include <memory>
 #include <span>
@@ -103,6 +104,9 @@ public:
     void Clear();
 };
 
+
+// Extract default-time positions and topology, validating indices and omitting hole faces.
+bool ExtractMeshData(const UsdGeomMesh& mesh, MeshData& dst);
 
 // インデックスを作り直す。
 // 独立したインデックスを持つ頂点要素やインデックス展開された頂点要素を、単一のインデックスに統合する。

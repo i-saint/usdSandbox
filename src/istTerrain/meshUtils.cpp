@@ -10,6 +10,53 @@
 using float2 = GfVec2f;
 using float3 = GfVec3f;
 
+bool ExtractMeshData(const UsdGeomMesh& mesh, MeshData& dst)
+{
+    MeshData data;
+    VtIntArray counts, indices, holes;
+    if (!mesh.GetPointsAttr().Get(&data.points) || !mesh.GetFaceVertexCountsAttr().Get(&counts) ||
+        !mesh.GetFaceVertexIndicesAttr().Get(&indices)) {
+        TF_RUNTIME_ERROR("Missing mesh geometry on '%s'", mesh.GetPath().GetText());
+        return false;
+    }
+    mesh.GetHoleIndicesAttr().Get(&holes);
+    std::unordered_set<int> holeSet;
+    for (int face : holes) {
+        if (face < 0 || static_cast<size_t>(face) >= counts.size()) {
+            TF_RUNTIME_ERROR("Invalid hole index on '%s'", mesh.GetPath().GetText());
+            return false;
+        }
+        holeSet.insert(face);
+    }
+    data.counts.reserve(counts.size());
+    data.indices.reserve(indices.size());
+    size_t offset = 0;
+    for (size_t face = 0; face < counts.size(); ++face) {
+        const int count = counts[face];
+        if (count < 3 || count > 46340 || static_cast<size_t>(count) > indices.size() - offset) {
+            TF_RUNTIME_ERROR("Invalid or oversized face topology on '%s'", mesh.GetPath().GetText());
+            return false;
+        }
+        for (size_t i = offset; i < offset + static_cast<size_t>(count); ++i) {
+            if (indices[i] < 0 || static_cast<size_t>(indices[i]) >= data.points.size()) {
+                TF_RUNTIME_ERROR("Invalid vertex index on '%s'", mesh.GetPath().GetText());
+                return false;
+            }
+        }
+        if (!holeSet.contains(static_cast<int>(face))) {
+            data.counts.push_back(count);
+            data.indices.insert(data.indices.end(), indices.begin() + offset, indices.begin() + offset + count);
+        }
+        offset += static_cast<size_t>(count);
+    }
+    if (offset != indices.size()) {
+        TF_RUNTIME_ERROR("Face index count mismatch on '%s'", mesh.GetPath().GetText());
+        return false;
+    }
+    dst = std::move(data);
+    return true;
+}
+
 GfRange3f FastBounds(std::span<const GfVec3f> points)
 {
     static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
