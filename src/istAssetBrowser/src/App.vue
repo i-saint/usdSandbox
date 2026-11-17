@@ -168,7 +168,7 @@ onMounted(() => {
     <header class="topbar">
       <div class="brand">
         <i class="pi pi-box brand-icon" />
-        <span class="brand-title">USD Asset Browser</span>
+        <span class="brand-title">IST Asset Browser</span>
       </div>
 
       <form class="server-form" @submit.prevent="loadFromServer(true)">

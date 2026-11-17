@@ -10,7 +10,7 @@ export interface DirectoryListResponse {
   files: string[]
 }
 
-const STORAGE_KEY_SERVER_URL = 'usdAssetBrowser.serverUrl'
+const STORAGE_KEY_SERVER_URL = 'istAssetBrowser.serverUrl'
 
 export function normalizeBaseUrl(rawUrl: string): string {
   return rawUrl.trim().replace(/\/+$/, '')
@@ -23,7 +23,9 @@ export function resolveInitialServerUrl(): string {
     return normalizeBaseUrl(fromQuery)
   }
 
-  const fromStorage = localStorage.getItem(STORAGE_KEY_SERVER_URL)
+  const fromStorage =
+    localStorage.getItem(STORAGE_KEY_SERVER_URL) ??
+    localStorage.getItem('usdAssetBrowser.serverUrl')
   if (fromStorage && fromStorage.trim()) {
     return normalizeBaseUrl(fromStorage)
   }
