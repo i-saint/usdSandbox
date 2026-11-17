@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import Select from 'primevue/select'
 import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
@@ -12,6 +13,7 @@ const emit = defineEmits<{ close: [] }>()
 const viewport = ref<HTMLDivElement | null>(null)
 const loading = ref(true)
 const errorMessage = ref('')
+const maximized = ref(false)
 const abortController = new AbortController()
 let disposed = false
 let started = false
@@ -19,6 +21,68 @@ let renderer: THREE.WebGLRenderer | undefined
 let controls: OrbitControls | undefined
 let observer: ResizeObserver | undefined
 let scene: THREE.Scene | undefined
+
+type ShadingMode = 'solid' | 'wireframe' | 'combined'
+const STORAGE_KEY_SHADING_MODE = 'istAssetBrowser.shadingMode'
+const savedShadingMode = localStorage.getItem(STORAGE_KEY_SHADING_MODE)
+const shadingMode = ref<ShadingMode>(
+  savedShadingMode === 'wireframe' || savedShadingMode === 'combined' ? savedShadingMode : 'solid',
+)
+const shadingModes: { value: ShadingMode; label: string }[] = [
+  { value: 'solid', label: 'ポリゴン' },
+  { value: 'wireframe', label: 'ワイヤフレーム' },
+  { value: 'combined', label: 'ポリゴン＋ワイヤフレーム' },
+]
+const shadedMeshes: {
+  mesh: THREE.Mesh
+  material: THREE.Material | THREE.Material[]
+  overlay: THREE.Mesh
+}[] = []
+const surfaceMaterials = new Map<THREE.Material, { enabled: boolean; factor: number; units: number }>()
+
+function updateShadingMode() {
+  for (const { mesh, material, overlay } of shadedMeshes) {
+    mesh.material = shadingMode.value === 'wireframe' ? overlay.material : material
+    overlay.visible = shadingMode.value === 'combined'
+  }
+  for (const [material, original] of surfaceMaterials) {
+    const combined = shadingMode.value === 'combined'
+    material.polygonOffset = combined || original.enabled
+    material.polygonOffsetFactor = combined ? 1 : original.factor
+    material.polygonOffsetUnits = combined ? 1 : original.units
+  }
+}
+
+function prepareShading(model: THREE.Object3D) {
+  const meshes: THREE.Mesh[] = []
+  model.traverse((object) => {
+    if (object instanceof THREE.Mesh) meshes.push(object)
+  })
+  if (meshes.length === 0) return
+  const wireMaterial = new THREE.MeshBasicMaterial({ color: 0x60a5fa, wireframe: true })
+  for (const mesh of meshes) {
+    const overlay = new THREE.Mesh(mesh.geometry, wireMaterial)
+    overlay.visible = false
+    overlay.raycast = () => {}
+    mesh.add(overlay)
+    shadedMeshes.push({ mesh, material: mesh.material, overlay })
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      if (!surfaceMaterials.has(material)) {
+        surfaceMaterials.set(material, {
+          enabled: material.polygonOffset,
+          factor: material.polygonOffsetFactor,
+          units: material.polygonOffsetUnits,
+        })
+      }
+    }
+  }
+  updateShadingMode()
+}
+
+watch(shadingMode, (mode) => {
+  updateShadingMode()
+  localStorage.setItem(STORAGE_KEY_SHADING_MODE, mode)
+})
 
 function disposeModel(model: THREE.Object3D) {
   const geometries = new Set<THREE.BufferGeometry>()
@@ -48,6 +112,9 @@ function releaseViewer() {
   observer?.disconnect()
   renderer?.setAnimationLoop(null)
   controls?.dispose()
+  for (const { mesh, material } of shadedMeshes) mesh.material = material
+  shadedMeshes.length = 0
+  surfaceMaterials.clear()
   if (scene) {
     disposeModel(scene)
     scene.clear()
@@ -119,6 +186,7 @@ async function initialize() {
     }
     gltf.scene.position.sub(sphere.center)
     model.scale.setScalar(1 / sphere.radius)
+    prepareShading(gltf.scene)
     const halfFov = THREE.MathUtils.degToRad(camera.fov / 2)
     const fitAngle = Math.min(halfFov, Math.atan(Math.tan(halfFov) * camera.aspect))
     const distance = 1.15 / Math.sin(fitAngle)
@@ -150,10 +218,28 @@ onBeforeUnmount(() => {
     :header="fileName"
     modal
     maximizable
-    :style="{ width: '90vw', maxWidth: '1400px' }"
+    :style="{
+      width: maximized ? '100vw' : '90vw',
+      maxWidth: maximized ? 'none' : '1400px',
+      height: maximized ? '100vh' : '85vh',
+    }"
+    :contentStyle="{ display: 'flex', flexDirection: 'column', flex: '1', minHeight: '0', overflow: 'hidden' }"
+    @maximize="maximized = true"
+    @unmaximize="maximized = false"
     @update:visible="(visible) => { if (!visible) emit('close') }"
     @show="initialize"
   >
+    <div class="shading-toolbar">
+      <Select
+        v-model="shadingMode"
+        :options="shadingModes"
+        optionLabel="label"
+        optionValue="value"
+        aria-label="シェーディングモード"
+        :disabled="loading || !!errorMessage"
+        size="small"
+      />
+    </div>
     <div class="preview-shell">
       <div ref="viewport" class="preview-viewport" aria-label="3D モデルプレビュー" />
       <div v-if="loading" class="preview-overlay" role="status">
@@ -169,14 +255,25 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.shading-toolbar {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .preview-shell {
   position: relative;
+  flex: 1;
+  min-height: 0;
 }
 
 .preview-viewport {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  height: 65vh;
-  min-height: 240px;
+  height: 100%;
   overflow: hidden;
   background: #14161a;
 }
@@ -198,6 +295,7 @@ onBeforeUnmount(() => {
 }
 
 .preview-help {
+  flex-shrink: 0;
   margin-top: 8px;
   font-size: 0.8rem;
   color: #9ca3af;
