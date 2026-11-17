@@ -54,7 +54,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="istGltfFileFormat.cpp" />
-    <ClCompile Include="..\istTerrain\meshUtils.cpp" />
+    <ClCompile Include="..\istTerrain\meshUtils.cpp">
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+    </ClCompile>
     <None Include="plugInfo.json" />
     <ProjectReference Include="..\setup\setup.vcxproj">
       <Project>{9B9E8926-2BA4-46F2-94F3-EBB3C2867A24}</Project>

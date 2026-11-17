@@ -97,6 +97,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="istObjFileFormat.cpp" />
+    <ClCompile Include="..\istTerrain\meshUtils.cpp">
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="plugInfo.json">

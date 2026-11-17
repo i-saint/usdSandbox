@@ -1,6 +1,7 @@
-﻿#include "istObjFileFormat.h"
+﻿#include "../istTerrain/pch.h"
+#include "../istTerrain/meshUtils.h"
+#include "istObjFileFormat.h"
 
-#include "pxr/base/gf/range3f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/tf/registryManager.h"
 #include "pxr/base/vt/array.h"
@@ -170,9 +171,7 @@ SdfLayerRefPtr TranslateObjToUsd(
     if (!stage)
         return {};
 
-    GfRange3f extent;
-    for (const auto& point : points)
-        extent.UnionWith(point);
+    const GfRange3f extent = FastBounds(points);
     VtVec3fArray extentArray;
     if (!points.empty()) {
         extentArray.push_back(extent.GetMin());

@@ -263,10 +263,12 @@ bool ImportPrimitive(const cgltf_primitive& primitive, const cgltf_node& node, b
         counts.assign(triangles.size() / 3, 3);
         indices.assign(triangles.begin(), triangles.end());
     }
+    const GfRange3f bounds = FastBounds(std::span<const GfVec3f>(points.data(), points.size()));
+    const VtVec3fArray extent{bounds.GetMin(), bounds.GetMax()};
     const SdfPath path = SdfPath::AbsoluteRootPath().AppendChild(TfToken("Mesh_" + std::to_string(number)));
     UsdGeomMesh mesh = UsdGeomMesh::Define(stage, path);
     if (!mesh || !mesh.CreatePointsAttr().Set(points) || !mesh.CreateFaceVertexCountsAttr().Set(counts) ||
-        !mesh.CreateFaceVertexIndicesAttr().Set(indices) || !mesh.CreateSubdivisionSchemeAttr().Set(UsdGeomTokens->none)) {
+        !mesh.CreateExtentAttr().Set(extent) || !mesh.CreateFaceVertexIndicesAttr().Set(indices) || !mesh.CreateSubdivisionSchemeAttr().Set(UsdGeomTokens->none)) {
         TF_RUNTIME_ERROR("Failed to create USD mesh '%s'", path.GetText());
         return false;
     }

@@ -2,11 +2,60 @@
 #include "meshUtils.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdint>
+#include <immintrin.h>
 #include <unordered_set>
 
 using float2 = GfVec2f;
 using float3 = GfVec3f;
+
+GfRange3f FastBounds(std::span<const GfVec3f> points)
+{
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
+    __m256 min0 = _mm256_set1_ps(FLT_MAX);
+    __m256 min1 = min0;
+    __m256 min2 = min0;
+    __m256 max0 = _mm256_set1_ps(-FLT_MAX);
+    __m256 max1 = max0;
+    __m256 max2 = max0;
+    size_t i = 0;
+    for (; points.size() - i >= 8; i += 8) {
+        // Three contiguous loads cover eight packed xyz vertices without gathers or overreads.
+        const float* p = points[i].data();
+        const __m256 a = _mm256_loadu_ps(p);
+        const __m256 b = _mm256_loadu_ps(p + 8);
+        const __m256 c = _mm256_loadu_ps(p + 16);
+        // Keep the accumulator as the second operand so NaNs do not replace valid extrema.
+        min0 = _mm256_min_ps(a, min0);
+        min1 = _mm256_min_ps(b, min1);
+        min2 = _mm256_min_ps(c, min2);
+        max0 = _mm256_max_ps(a, max0);
+        max1 = _mm256_max_ps(b, max1);
+        max2 = _mm256_max_ps(c, max2);
+    }
+    alignas(32) float minima[24];
+    alignas(32) float maxima[24];
+    _mm256_store_ps(minima, min0);
+    _mm256_store_ps(minima + 8, min1);
+    _mm256_store_ps(minima + 16, min2);
+    _mm256_store_ps(maxima, max0);
+    _mm256_store_ps(maxima + 8, max1);
+    _mm256_store_ps(maxima + 16, max2);
+    _mm256_zeroupper();
+
+    GfVec3f lower(FLT_MAX);
+    GfVec3f upper(-FLT_MAX);
+    for (size_t j = 0; j < 24; ++j) {
+        const size_t axis = j % 3;
+        if (minima[j] < lower[axis]) lower[axis] = minima[j];
+        if (maxima[j] > upper[axis]) upper[axis] = maxima[j];
+    }
+    GfRange3f bounds(lower, upper);
+    for (; i < points.size(); ++i)
+        bounds.UnionWith(points[i]);
+    return bounds;
+}
 
 template<class T>
 class MeshRefiner::IndexedAttribute final : public MeshRefiner::IAttribute

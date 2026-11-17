@@ -76,9 +76,12 @@ static bool VerifyImported(const SdfLayerRefPtr& layer, const VtIntArray& expect
     UsdStageRefPtr stage = UsdStage::Open(layer);
     if (!Check(static_cast<bool>(stage), "imported stage missing")) return false;
     UsdGeomMesh mesh(stage->GetPrimAtPath(SdfPath("/Mesh_0")));
-    VtVec3fArray points;
+    VtVec3fArray points, extent;
     VtIntArray counts;
     return Check(mesh && mesh.GetPointsAttr().Get(&points) && mesh.GetFaceVertexCountsAttr().Get(&counts), "imported mesh missing")
+        && Check(mesh.GetExtentAttr().Get(&extent) && extent.size() == 2
+            && GfIsClose(extent[0], GfVec3f(1.0f, 3.0f, -2.02f), 1e-5)
+            && GfIsClose(extent[1], GfVec3f(1.02f, 3.0f, -2.0f), 1e-5), "imported extent incorrect")
         && Check(counts == expectedCounts, "imported face counts incorrect")
         && Check(points.size() == 5 && std::abs(points[0][0] - 1.0f) < 1e-5f
             && std::abs(points[0][1] - 3.0f) < 1e-5f && std::abs(points[0][2] + 2.0f) < 1e-5f, "imported positions incorrect")

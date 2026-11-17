@@ -1,6 +1,12 @@
 ﻿#pragma once
 
+#include <pxr/base/gf/range3f.h>
+
 #include <memory>
+#include <span>
+
+// Requires AVX2. Empty input returns an empty range; NaN components are ignored.
+GfRange3f FastBounds(std::span<const GfVec3f> points);
 
 constexpr int kMaxUvSets = 4;
 
