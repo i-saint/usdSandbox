@@ -68,16 +68,23 @@ export async function fetchDirectoryList(
   return (await res.json()) as DirectoryListResponse
 }
 
+export function buildModelPreviewUrl(baseUrl: string, dir: string, fileName: string): string {
+  return buildAssetUrl(baseUrl, dir, `${fileName}.glb`)
+}
+
+function buildAssetUrl(baseUrl: string, dir: string, fileName: string): string {
+  const segments = dir ? dir.split('/').filter(Boolean).map(encodeURIComponent) : []
+  segments.push(encodeURIComponent(fileName))
+  return `${normalizeBaseUrl(baseUrl)}/files/${segments.join('/')}`
+}
+
 export function buildScreenshotUrl(
   baseUrl: string,
   dir: string,
   fileName: string,
   reloadToken = 0,
 ): string {
-  const base = normalizeBaseUrl(baseUrl)
-  const segments = dir ? dir.split('/').filter(Boolean).map(encodeURIComponent) : []
-  segments.push(encodeURIComponent(`${fileName}.jpg`))
-  const url = `${base}/files/${segments.join('/')}`
+  const url = buildAssetUrl(baseUrl, dir, `${fileName}.jpg`)
   return reloadToken > 0 ? `${url}?r=${reloadToken}` : url
 }
 

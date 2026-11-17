@@ -14,8 +14,10 @@ import type { TreeExpandedKeys, TreeSelectionKeys } from 'primevue/tree'
 import type { TreeNode } from 'primevue/treenode'
 
 import AssetCard from './components/AssetCard.vue'
+import ModelPreview from './components/ModelPreview.vue'
 import {
   buildDirectoryTree,
+  buildModelPreviewUrl,
   buildScreenshotUrl,
   dirToTreeKey,
   fetchDirectories,
@@ -38,6 +40,14 @@ const files = ref<string[]>([])
 const searchQuery = ref('')
 const cardWidth = ref(192)
 const reloadToken = ref(0)
+const previewAsset = ref<{ fileName: string; url: string } | null>(null)
+
+function openPreview(fileName: string) {
+  previewAsset.value = {
+    fileName,
+    url: buildModelPreviewUrl(activeServerUrl.value, currentDir.value, fileName),
+  }
+}
 
 const loadingDirs = ref(false)
 const loadingList = ref(false)
@@ -281,6 +291,7 @@ onMounted(() => {
                 :fileName="fileName"
                 :screenshotUrl="getScreenshotUrl(fileName)"
                 :cardWidth="cardWidth"
+                @preview="openPreview(fileName)"
               />
             </div>
 
@@ -298,6 +309,13 @@ onMounted(() => {
         </div>
       </SplitterPanel>
     </Splitter>
+
+    <ModelPreview
+      v-if="previewAsset"
+      :fileName="previewAsset.fileName"
+      :url="previewAsset.url"
+      @close="previewAsset = null"
+    />
   </div>
 </template>
 

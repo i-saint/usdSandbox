@@ -6,8 +6,19 @@
                     "UsdGltfFileFormat": {
                         "bases": ["SdfFileFormat"],
                         "displayName": "glTF Mesh Import and Export",
-                        "extensions": ["gltf", "glb"],
+                        "extensions": ["gltf"],
                         "formatId": "istGltf",
+                        "primary": true,
+                        "supportsReading": true,
+                        "supportsEditing": false,
+                        "supportsWriting": true,
+                        "target": "usd"
+                    },
+                    "UsdGlbFileFormat": {
+                        "bases": ["UsdGltfFileFormat"],
+                        "displayName": "GLB Mesh Import and Export",
+                        "extensions": ["glb"],
+                        "formatId": "istGlb",
                         "primary": true,
                         "supportsReading": true,
                         "supportsEditing": false,

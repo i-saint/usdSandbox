@@ -12,7 +12,10 @@
 #include <oneapi/tbb/task_group.h>
 #include <pxr/pxr.h>
 #include <pxr/base/plug/registry.h>
+#include <pxr/base/tf/errorMark.h>
 #include <pxr/usd/sdf/fileFormat.h>
+#include <pxr/usd/sdf/layer.h>
+#include <pxr/usd/usd/stage.h>
 #pragma warning(pop)
 
 #include <algorithm>
@@ -993,7 +996,14 @@ private:
 class AssetDatabase final : public IAssetDatabase
 {
 public:
-    AssetDatabase() = default;
+    AssetDatabase()
+    {
+        static std::once_flag registerPlugins;
+        std::call_once(registerPlugins, [] {
+            pxr::PlugRegistry::GetInstance().RegisterPlugins(
+                PathToUtf8(GetCurrentDllDirectory() / L"istGltf"));
+        });
+    }
 
     ~AssetDatabase() noexcept override
     {
@@ -1307,12 +1317,101 @@ private:
         svr.Get(R"(/files(?:/.*)?)", [this](const httplib::Request& req, httplib::Response& res) {
             constexpr std::string_view kFilesPrefix = "/files";
             const std::string_view subPath = std::string_view(req.path).substr(kFilesPrefix.size());
+            if (subPath.ends_with(".glb")) {
+                const auto normalized = NormalizeRelativeDir(subPath);
+                if (normalized) {
+                    const size_t slash = normalized->rfind('/');
+                    const std::string dir = slash == std::string::npos ? std::string() : normalized->substr(0, slash);
+                    const std::string file = normalized->substr(slash == std::string::npos ? 0 : slash + 1);
+                    const auto contents = ListDirectory(dir);
+                    // Preserve direct GLB downloads unless the path identifies a generated preview.
+                    if (contents && std::binary_search(contents->files.begin(), contents->files.end(), file) &&
+                        !std::binary_search(contents->files.begin(), contents->files.end(), file.substr(0, file.size() - 4))) {
+                        ServeStaticFileFromRoot(GetRootDirectory(), subPath, true, req, res);
+                        return;
+                    }
+                }
+                ServeModelPreview(subPath.substr(0, subPath.size() - 4), res);
+                return;
+            }
             ServeStaticFileFromRoot(GetRootDirectory(), subPath, true, req, res);
         });
 
         svr.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
             ServeStaticFileFromRoot(GetServerRootDirectory(), req.path, false, req, res);
         });
+    }
+
+    void ServeModelPreview(std::string_view assetPath, httplib::Response& res)
+    {
+        const auto fail = [this, &res](int status, const std::string& message) {
+            if (GetLogLevel() >= LogLevel::Error)
+                WriteConsoleLine(true, "[Preview] " + message);
+            res.status = status;
+            res.set_content(nlohmann::json({ { "error", message } }).dump(),
+                "application/json; charset=utf-8");
+        };
+
+        const auto normalized = NormalizeRelativeDir(assetPath);
+        if (!normalized || normalized->empty() || assetPath.find('\0') != std::string_view::npos ||
+            assetPath.find(':') != std::string_view::npos) {
+            fail(400, "Invalid asset path");
+            return;
+        }
+        const size_t slash = normalized->rfind('/');
+        const std::string dir = slash == std::string::npos ? std::string() : normalized->substr(0, slash);
+        const std::string file = normalized->substr(slash == std::string::npos ? 0 : slash + 1);
+
+        std::filesystem::path root;
+        {
+            std::shared_lock lock(m_dataMutex);
+            const auto entry = m_directories.find(dir);
+            if (entry == m_directories.end() ||
+                !std::binary_search(entry->second.files.begin(), entry->second.files.end(), file)) {
+                fail(404, "Asset not found");
+                return;
+            }
+            root = m_rootDirectory;
+        }
+
+        std::error_code ec;
+        const auto source = std::filesystem::canonical(root / PathFromUtf8(dir) / PathFromUtf8(file), ec);
+        if (ec || !std::filesystem::is_regular_file(source, ec) || ec) {
+            fail(404, "Asset file not found");
+            return;
+        }
+        auto rootKey = MakeNormalizedPathKey(root);
+        if (!rootKey.ends_with(L'\\'))
+            rootKey += L'\\';
+        if (!MakeNormalizedPathKey(source).starts_with(rootKey)) {
+            fail(403, "Asset is outside the asset root");
+            return;
+        }
+
+        // Bound conversion concurrency and keep USD layer access read-only.
+        std::lock_guard conversionLock(m_previewMutex);
+        pxr::TfErrorMark errors;
+        const auto format = pxr::SdfFileFormat::FindByExtension("glb");
+        if (!format) {
+            fail(503, "GLB file-format plugin is unavailable");
+            return;
+        }
+        const auto stage = pxr::UsdStage::Open(PathToUtf8(source));
+        std::string glb;
+        const bool exported = stage && format->WriteToString(*stage->GetRootLayer(), &glb);
+        if (!errors.IsClean()) {
+            for (const auto& error : errors) {
+                if (GetLogLevel() >= LogLevel::Error)
+                    WriteConsoleLine(true, "[Preview] " + error.GetCommentary());
+            }
+            errors.Clear();
+        }
+        if (!exported) {
+            fail(422, "Failed to convert asset to GLB: " + file);
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(std::move(glb), "model/gltf-binary");
     }
 
     void ServeStaticFileFromRoot(
@@ -1474,6 +1573,7 @@ private:
     std::filesystem::path m_serverRootDirectory;
     std::map<std::string, DirectoryContents> m_directories;
 
+    std::mutex m_previewMutex;
     mutable std::mutex m_serverMutex;
     std::unique_ptr<httplib::Server> m_server;
     std::thread m_serverThread;

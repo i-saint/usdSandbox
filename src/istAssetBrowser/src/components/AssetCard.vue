@@ -9,6 +9,8 @@ const props = defineProps<{
   cardWidth: number
 }>()
 
+const emit = defineEmits<{ preview: [] }>()
+
 const imgRef = ref<HTMLImageElement | null>(null)
 const imageState = ref<'loading' | 'loaded' | 'error'>('loading')
 
@@ -53,7 +55,17 @@ function onError() {
 </script>
 
 <template>
-  <div class="asset-card" :style="{ width: `${cardWidth}px` }" :title="fileName">
+  <div
+    class="asset-card"
+    :style="{ width: `${cardWidth}px` }"
+    :title="fileName"
+    role="button"
+    tabindex="0"
+    :aria-label="`${fileName} のプレビュー`"
+    @click="emit('preview')"
+    @keydown.enter.prevent="emit('preview')"
+    @keydown.space.prevent="emit('preview')"
+  >
     <div class="thumb-box" :style="{ height: `${cardWidth}px` }">
       <img
         v-if="imageState !== 'error'"
@@ -93,6 +105,7 @@ function onError() {
 .asset-card {
   display: flex;
   flex-direction: column;
+  cursor: pointer;
   background: #1c1f24;
   border: 1px solid #2c313a;
   border-radius: 8px;

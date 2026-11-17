@@ -32,7 +32,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 static bool ImportGltf(SdfLayer* layer, const std::string& source, bool fromString);
 
-class UsdGltfFileFormat final : public SdfFileFormat
+class UsdGltfFileFormat : public SdfFileFormat
 {
 public:
     bool CanRead(const std::string& path) const override;
@@ -46,15 +46,24 @@ public:
 
 protected:
     SDF_FILE_FORMAT_FACTORY_ACCESS;
-    UsdGltfFileFormat()
-        : SdfFileFormat(TfToken("istGltf"), TfToken("1.0"), TfToken("usd"),
-            std::vector<std::string>{ "gltf", "glb" }) {}
+    UsdGltfFileFormat() : UsdGltfFileFormat("istGltf", "gltf") {}
+    UsdGltfFileFormat(const char* id, const char* extension)
+        : SdfFileFormat(TfToken(id), TfToken("1.0"), TfToken("usd"), extension) {}
     ~UsdGltfFileFormat() override = default;
+};
+
+class UsdGlbFileFormat final : public UsdGltfFileFormat
+{
+protected:
+    SDF_FILE_FORMAT_FACTORY_ACCESS;
+    UsdGlbFileFormat() : UsdGltfFileFormat("istGlb", "glb") {}
+    ~UsdGlbFileFormat() override = default;
 };
 
 TF_REGISTRY_FUNCTION(TfType)
 {
     SDF_DEFINE_FILE_FORMAT(UsdGltfFileFormat, SdfFileFormat);
+    SDF_DEFINE_FILE_FORMAT(UsdGlbFileFormat, UsdGltfFileFormat);
 }
 
 bool UsdGltfFileFormat::CanRead(const std::string& path) const
@@ -662,8 +671,8 @@ bool UsdGltfFileFormat::WriteToString(const SdfLayer& layer, std::string* str, c
         TF_CODING_ERROR("Cannot write glTF to a null string");
         return false;
     }
-    std::ostringstream output;
-    if (!ExportGltf(layer, SdfPath::AbsoluteRootPath(), false, output))
+    std::ostringstream output(std::ios::out | std::ios::binary);
+    if (!ExportGltf(layer, SdfPath::AbsoluteRootPath(), GetPrimaryFileExtension() == "glb", output))
         return false;
     *str = std::move(output).str();
     return true;
@@ -680,9 +689,23 @@ bool UsdGltfFileFormat::WriteToStream(const SdfSpecHandle& spec, std::ostream& o
         TF_RUNTIME_ERROR("Cannot find source layer for glTF stream export");
         return false;
     }
-    std::ostringstream serialized;
-    if (!ExportGltf(*layer, spec->GetPath(), false, serialized))
+    const bool glb = GetPrimaryFileExtension() == "glb";
+    if (glb && indent != 0) {
+        TF_CODING_ERROR("GLB stream export does not support indentation");
         return false;
+    }
+    std::ostringstream serialized(std::ios::out | std::ios::binary);
+    if (!ExportGltf(*layer, spec->GetPath(), glb, serialized))
+        return false;
+    if (glb) {
+        const std::string_view data = serialized.view();
+        out.write(data.data(), data.size());
+        if (!out) {
+            TF_RUNTIME_ERROR("Failed writing GLB output stream");
+            return false;
+        }
+        return true;
+    }
     const std::string_view json = serialized.view();
     if (indent > std::numeric_limits<size_t>::max() / 4) {
         TF_CODING_ERROR("glTF stream indentation is too large");

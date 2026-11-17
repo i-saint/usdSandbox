@@ -173,7 +173,26 @@ int main(int argc, char** argv)
     bool ok = Check(stage->GetRootLayer()->Export(gltf.string()), "gltf export failed") && Verify(gltf)
         && Check(stage->GetRootLayer()->Export(glb.string()), "glb export failed") && Verify(glb);
     const auto format = SdfFileFormat::FindByExtension("gltf");
+    const auto binaryFormat = SdfFileFormat::FindByExtension("glb");
     std::string text;
+    if (ok) {
+        std::ifstream input(glb, std::ios::binary);
+        const std::string fileBytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        std::string bytes;
+        std::ostringstream stream(std::ios::out | std::ios::binary);
+        SdfLayerRefPtr imported = SdfLayer::CreateAnonymous("binary-import.usda");
+        ok = Check(binaryFormat->WriteToString(*stage->GetRootLayer(), &bytes), "GLB memory export failed")
+            && Check(bytes.size() >= 12 && bytes.substr(0, 4) == "glTF", "GLB magic missing")
+            && Check(bytes == fileBytes, "GLB memory export differs from file")
+            && Check(binaryFormat->WriteToStream(stage->GetRootLayer()->GetPseudoRoot(), stream, 0), "GLB stream export failed")
+            && Check(stream.str() == bytes, "GLB stream differs from memory export")
+            && Check(binaryFormat->ReadFromString(imported.operator->(), bytes), "GLB memory import failed")
+            && VerifyImported(imported, VtIntArray{3, 3, 3});
+        std::ostringstream indented;
+        indented << "unchanged";
+        if (ok) ok = Check(!binaryFormat->WriteToStream(stage->GetRootLayer()->GetPseudoRoot(), indented, 1)
+            && indented.str() == "unchanged", "GLB stream accepted indentation or modified output");
+    }
     if (ok) ok = TestImportScene(format, directory);
     if (ok) {
         SdfLayerRefPtr gltfLayer = SdfLayer::FindOrOpen(gltf.string());
@@ -248,6 +267,7 @@ int main(int argc, char** argv)
         stream << "unchanged";
         ok = Check(!stage->GetRootLayer()->Export(glb.string()), "invalid index was accepted")
             && Check(!format->WriteToString(*stage->GetRootLayer(), &text) && text == "unchanged", "invalid string export modified output")
+            && Check(!binaryFormat->WriteToString(*stage->GetRootLayer(), &text) && text == "unchanged", "invalid GLB memory export modified output")
             && Check(!format->WriteToStream(stage->GetRootLayer()->GetPseudoRoot(), stream, 0) && stream.str() == "unchanged", "invalid stream export modified output");
     }
     if (ok) {
