@@ -1,4 +1,4 @@
-{
+﻿{
     "Plugins": [
         {
             "Info": {
@@ -11,7 +11,7 @@
                         "extensions": [
                             "obj"
                         ],
-                        "formatId": "usdObjPlus",
+                        "formatId": "istObj",
                         "primary": true,
                         "supportsEditing": false,
                         "supportsWriting": true,
@@ -19,8 +19,8 @@
                     }
                 }
             },
-            "LibraryPath": "usdObjPlus.dll",
-            "Name": "usdObjPlus",
+            "LibraryPath": "istObj.dll",
+            "Name": "istObj",
             "ResourcePath": ".",
             "Root": ".",
             "Type": "library"

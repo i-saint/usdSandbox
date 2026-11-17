@@ -14,7 +14,7 @@
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{8D2B74E1-4F65-4C9A-A1C2-3890F5D2B710}</ProjectGuid>
-    <RootNamespace>usdScreenshot</RootNamespace>
+    <RootNamespace>istScreenshot</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />

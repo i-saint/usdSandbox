@@ -116,11 +116,11 @@ static void PrintUsage()
 {
     std::cout <<
         "Usage:\n"
-        "  usdScreenshot <input.usd> <output.png> [options]\n"
-        "  usdScreenshot <inputDir> <outputDir> [options]\n"
-        "  usdScreenshot --list <tasks.txt> [-o <outputDir>] [options]\n"
-        "  usdScreenshot <file1.usd> [file2.usd ...] -o <outputDir> [options]\n"
-        "  usdScreenshot --worker [options]\n"
+        "  istScreenshot <input.usd> <output.png> [options]\n"
+        "  istScreenshot <inputDir> <outputDir> [options]\n"
+        "  istScreenshot --list <tasks.txt> [-o <outputDir>] [options]\n"
+        "  istScreenshot <file1.usd> [file2.usd ...] -o <outputDir> [options]\n"
+        "  istScreenshot --worker [options]\n"
         "\n"
         "Batch & Process Options:\n"
         "  -j, --jobs <N>                  Number of worker processes (default: auto)\n"

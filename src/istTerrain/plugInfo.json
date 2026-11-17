@@ -1,4 +1,4 @@
-{
+﻿{
     "Plugins": [
         {
             "Info": {
@@ -20,7 +20,7 @@
                         "extensions": [
                             "usdterrain"
                         ],
-                        "formatId": "usdTerrain",
+                        "formatId": "istTerrain",
                         "primary": true,
                         "supportsEditing": false,
                         "supportsWriting": false,
@@ -28,8 +28,8 @@
                     }
                 }
             },
-            "LibraryPath": "../usdTerrain.dll",
-            "Name": "usdTerrain",
+            "LibraryPath": "../istTerrain.dll",
+            "Name": "istTerrain",
             "ResourcePath": "resources",
             "Root": "..",
             "Type": "library"

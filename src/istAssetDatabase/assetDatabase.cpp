@@ -265,7 +265,7 @@ static std::filesystem::path ResolveScreenshotExecutablePath()
 {
     const std::filesystem::path dllDir = GetCurrentDllDirectory();
     if (!dllDir.empty()) {
-        const std::filesystem::path candidate = dllDir / L"usdScreenshot.exe";
+        const std::filesystem::path candidate = dllDir / L"istScreenshot.exe";
         std::error_code ec;
         if (std::filesystem::is_regular_file(candidate, ec) && !ec)
             return candidate;
@@ -273,7 +273,7 @@ static std::filesystem::path ResolveScreenshotExecutablePath()
 
     const std::filesystem::path exeDir = GetModuleDirectory(nullptr);
     if (!exeDir.empty() && exeDir != dllDir) {
-        const std::filesystem::path candidate = exeDir / L"usdScreenshot.exe";
+        const std::filesystem::path candidate = exeDir / L"istScreenshot.exe";
         std::error_code ec;
         if (std::filesystem::is_regular_file(candidate, ec) && !ec)
             return candidate;

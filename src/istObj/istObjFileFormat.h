@@ -9,7 +9,7 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 #define USD_OBJ_PLUS_FILE_FORMAT_TOKENS \
-    ((Id, "usdObjPlus"))              \
+    ((Id, "istObj"))                  \
     ((Version, "1.0"))                \
     ((Target, "usd"))                 \
     ((Extension, "obj"))

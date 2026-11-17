@@ -124,12 +124,12 @@ static void PrintUsage()
 {
     std::cout <<
         "Usage:\n"
-        "  usdAssetDatabase [options] [assetsDir] [htmlDir]\n"
+        "  istAssetDatabase [options] [assetsDir] [htmlDir]\n"
         "\n"
         "Options:\n"
         "  -a, --assets <dir>       Asset root directory (default: ./assets)\n"
         "  -w, --html <dir>         HTTP static file root directory (default: ./html)\n"
-        "  -j, --jobs <N>           Number of usdScreenshot worker processes (default: 4)\n"
+        "  -j, --jobs <N>           Number of istScreenshot worker processes (default: 4)\n"
         "  -l, --logLevel <level>   Log level: silent, error, info, debug (default: info)\n"
         "  -q, --quiet              Alias for --logLevel silent\n"
         "  -v, --verbose            Alias for --logLevel debug\n"

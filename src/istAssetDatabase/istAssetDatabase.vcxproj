@@ -14,7 +14,7 @@
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{4B2F9A3D-7E61-4C98-9D1A-52E38C10B7F4}</ProjectGuid>
-    <RootNamespace>usdAssetDatabase</RootNamespace>
+    <RootNamespace>istAssetDatabase</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -107,7 +107,7 @@
       <Project>{9B9E8926-2BA4-46F2-94F3-EBB3C2867A24}</Project>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
-    <ProjectReference Include="..\usdScreenshot\usdScreenshot.vcxproj">
+    <ProjectReference Include="..\istScreenshot\istScreenshot.vcxproj">
       <Project>{8D2B74E1-4F65-4C9A-A1C2-3890F5D2B710}</Project>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>

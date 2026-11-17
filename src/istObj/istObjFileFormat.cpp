@@ -1,4 +1,4 @@
-﻿#include "usdObjPlusFileFormat.h"
+﻿#include "istObjFileFormat.h"
 
 #include "pxr/base/gf/range3f.h"
 #include "pxr/base/gf/vec3d.h"

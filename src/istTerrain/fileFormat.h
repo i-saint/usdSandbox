@@ -3,7 +3,7 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 #define USD_TERRAIN_FILE_FORMAT_TOKENS      \
-    ((Id, "usdTerrain"))                    \
+    ((Id, "istTerrain"))                    \
     ((Version, "1.0"))                      \
     ((Target, "usd"))                       \
     ((Extension, "usdterrain"))             \

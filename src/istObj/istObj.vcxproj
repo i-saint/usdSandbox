@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -13,8 +13,8 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{0089ae0e-e430-4217-90be-61e3a55cd34c}</ProjectGuid>
-    <RootNamespace>usdTerrain</RootNamespace>
+    <ProjectGuid>{640B7B1F-D0C5-4A0B-A212-1C294E5DD891}</ProjectGuid>
+    <RootNamespace>istObj</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -32,10 +32,8 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <ImportGroup Label="ExtensionSettings">
-  </ImportGroup>
-  <ImportGroup Label="Shared">
-  </ImportGroup>
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
     <Import Project="..\usd.props" />
@@ -46,8 +44,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <OutDir>$(SolutionDir)_bin\$(Platform)_$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)_tmp\$(Platform)_$(Configuration)_$(ProjectName)\</IntDir>
+    <OutDir>$(ProjectDir)..\..\_bin\$(Platform)_$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\_tmp\$(Platform)_$(Configuration)_$(ProjectName)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg">
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
@@ -56,14 +54,12 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>USDTERRAIN_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ISTOBJ_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <DisableSpecificWarnings>4244;4273;4305;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <AdditionalOptions>/utf-8 /Zc:inline- %(AdditionalOptions)</AdditionalOptions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\externals;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -80,14 +76,12 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;TBB_USE_DEBUG=0;USDTERRAIN_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;TBB_USE_DEBUG=0;ISTOBJ_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <DisableSpecificWarnings>4244;4273;4305;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <AdditionalOptions>/utf-8 /Zc:inline- %(AdditionalOptions)</AdditionalOptions>
       <RemoveUnreferencedCodeData>false</RemoveUnreferencedCodeData>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\externals;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -99,47 +93,23 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\externals\simdjson\simdjson.h" />
-    <ClInclude Include="..\..\externals\ufbx\ufbx.h" />
-    <ClInclude Include="fbxAnimation.h" />
-    <ClInclude Include="fileFormat.h" />
-    <ClInclude Include="GPGPU.h" />
-    <ClInclude Include="GPGPU_internal.h" />
-    <ClInclude Include="json.h" />
-    <ClInclude Include="meshUtils.h" />
-    <ClInclude Include="pch.h" />
-    <ClInclude Include="unorm.h" />
+    <ClInclude Include="istObjFileFormat.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\externals\simdjson\simdjson.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
-    <ClCompile Include="..\..\externals\ufbx\ufbx.c">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
-    <ClCompile Include="fbxAnimation.cpp" />
-    <ClCompile Include="fileFormat.cpp" />
-    <ClCompile Include="hioLodImage.cpp" />
-    <ClCompile Include="GPGPU_D3D11.cpp" />
-    <ClCompile Include="GPGPU_D3D12.cpp" />
-    <ClCompile Include="GPGPU_Vulkan.cpp" />
-    <ClCompile Include="json.cpp" />
-    <ClCompile Include="meshUtils.cpp" />
-    <ClCompile Include="pch.cpp">
-      <PrecompiledHeader>Create</PrecompiledHeader>
-    </ClCompile>
+    <ClCompile Include="istObjFileFormat.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="plugInfo.json" />
-    <None Include="..\vcpkg.json" />
+    <None Include="plugInfo.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ItemGroup>
     <ProjectReference Include="..\setup\setup.vcxproj">
       <Project>{9B9E8926-2BA4-46F2-94F3-EBB3C2867A24}</Project>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
   </ItemGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyUsdRuntime" AfterTargets="Build" Condition="Exists('$(UsdSdkRoot)\lib\usd_ms.dll')">
     <ItemGroup>
       <UsdRuntimeDll Include="$(UsdSdkRoot)\lib\usd_ms.dll" />
@@ -151,6 +121,5 @@
   <Target Name="ValidateUsdPythonHeaders" BeforeTargets="ClCompile">
     <Error Condition="!Exists('$(PythonIncludeDir)\pyconfig.h')" Text="USD 26.11.1 requires Python 3.14 development headers. Set PythonIncludeDir to the Python 3.14 include directory." />
   </Target>
-  <ImportGroup Label="ExtensionTargets">
-  </ImportGroup>
+  <ImportGroup Label="ExtensionTargets" />
 </Project>

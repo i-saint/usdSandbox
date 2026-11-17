@@ -63,7 +63,7 @@ static HWND CreateHiddenWindow()
     return CreateWindowExW(
         0,
         kWindowClassName,
-        L"usdScreenshot",
+        L"istScreenshot",
         WS_POPUP,
         0, 0, 1, 1,
         nullptr,
