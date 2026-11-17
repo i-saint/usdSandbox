@@ -218,6 +218,7 @@ onBeforeUnmount(() => {
     :header="fileName"
     modal
     maximizable
+    :dismissableMask="!maximized"
     :style="{
       width: maximized ? '100vw' : '90vw',
       maxWidth: maximized ? 'none' : '1400px',
