@@ -13,6 +13,8 @@ const viewport = ref<HTMLDivElement | null>(null)
 const loading = ref(true)
 const errorMessage = ref('')
 const maximized = ref(false)
+const meshStats = ref<{ vertices: number; triangles: number }>()
+const countFormat = new Intl.NumberFormat('ja-JP')
 const abortController = new AbortController()
 let disposed = false
 let started = false
@@ -104,9 +106,16 @@ function prepareShading(model: THREE.Object3D) {
     opacity: 0.1,
     depthWrite: false,
   })
+  let vertices = 0
+  let triangles = 0
   for (const mesh of meshes) {
-    const lines = new THREE.Mesh(mesh.geometry, wireMaterial)
-    const points = new THREE.Points(mesh.geometry, pointMaterial)
+    const { geometry } = mesh
+    const vertexCount = geometry.getAttribute('position').count
+    const instances = mesh instanceof THREE.InstancedMesh ? mesh.count : 1
+    vertices += vertexCount * instances
+    triangles += Math.floor((geometry.index?.count ?? vertexCount) / 3) * instances
+    const lines = new THREE.Mesh(geometry, wireMaterial)
+    const points = new THREE.Points(geometry, pointMaterial)
     lines.raycast = () => {}
     points.raycast = () => {}
     mesh.add(lines, points)
@@ -127,6 +136,7 @@ function prepareShading(model: THREE.Object3D) {
       }
     }
   }
+  meshStats.value = { vertices, triangles }
   updateShadingMode()
 }
 
@@ -388,7 +398,13 @@ onBeforeUnmount(() => {
         <Message severity="error" :closable="false">{{ errorMessage }}</Message>
       </div>
     </div>
-    <div class="preview-help">ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: 移動 / ポリゴンをダブルクリック: 中心に移動</div>
+    <div class="preview-footer">
+      <span class="preview-help">ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: 移動 / ダブルクリック: 中心に移動</span>
+      <div v-if="!loading && !errorMessage && meshStats" class="preview-stats">
+        <span>頂点数: {{ countFormat.format(meshStats.vertices) }}</span>
+        <span>ポリゴン数: {{ countFormat.format(meshStats.triangles) }}</span>
+      </div>
+    </div>
   </Dialog>
 </template>
 
@@ -467,10 +483,23 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 
-.preview-help {
+.preview-footer {
+  display: flex;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
   margin-top: 8px;
   font-size: 0.8rem;
+}
+
+.preview-help {
   color: #9ca3af;
+}
+
+.preview-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
 }
 </style>
