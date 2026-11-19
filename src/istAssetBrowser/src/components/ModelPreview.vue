@@ -1,6 +1,5 @@
 ﻿<script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import Select from 'primevue/select'
 import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
@@ -22,34 +21,64 @@ let controls: OrbitControls | undefined
 let observer: ResizeObserver | undefined
 let scene: THREE.Scene | undefined
 
-type ShadingMode = 'solid' | 'wireframe' | 'combined'
-const STORAGE_KEY_SHADING_MODE = 'istAssetBrowser.shadingMode'
-const savedShadingMode = localStorage.getItem(STORAGE_KEY_SHADING_MODE)
-const shadingMode = ref<ShadingMode>(
-  savedShadingMode === 'wireframe' || savedShadingMode === 'combined' ? savedShadingMode : 'solid',
-)
-const shadingModes: { value: ShadingMode; label: string }[] = [
-  { value: 'solid', label: 'ポリゴン' },
-  { value: 'wireframe', label: 'ワイヤフレーム' },
-  { value: 'combined', label: 'ポリゴン＋ワイヤフレーム' },
-]
+const CENTER_DURATION_MS = 200
+let centering: {
+  startedAt: number
+  fromPosition: THREE.Vector3
+  toPosition: THREE.Vector3
+  fromTarget: THREE.Vector3
+  toTarget: THREE.Vector3
+} | undefined
+
+const savedShadingMode = localStorage.getItem('istAssetBrowser.shadingMode')
+function savedToggle(name: string, defaultValue: boolean) {
+  const value = localStorage.getItem(`istAssetBrowser.preview.${name}`)
+  return value === 'true' ? true : value === 'false' ? false : defaultValue
+}
+const showPolygons = ref(savedToggle('polygons', savedShadingMode !== 'wireframe'))
+const showLines = ref(savedToggle('lines', savedShadingMode === 'wireframe' || savedShadingMode === 'combined'))
+const showPoints = ref(savedToggle('points', false))
+const doubleSided = ref(savedToggle('doubleSided', false))
+const showTextures = ref(savedToggle('textures', true))
 const shadedMeshes: {
   mesh: THREE.Mesh
   material: THREE.Material | THREE.Material[]
-  overlay: THREE.Mesh
+  lines: THREE.Mesh
+  points: THREE.Points
 }[] = []
-const surfaceMaterials = new Map<THREE.Material, { enabled: boolean; factor: number; units: number }>()
+const surfaceMaterials = new Map<THREE.Material, {
+  side: THREE.Side
+  enabled: boolean
+  factor: number
+  units: number
+  textures: Map<string, THREE.Texture>
+}>()
+let hiddenMaterial: THREE.MeshBasicMaterial | undefined
+let pointMaterial: THREE.PointsMaterial | undefined
 
 function updateShadingMode() {
-  for (const { mesh, material, overlay } of shadedMeshes) {
-    mesh.material = shadingMode.value === 'wireframe' ? overlay.material : material
-    overlay.visible = shadingMode.value === 'combined'
+  if (!hiddenMaterial) return
+  for (const { mesh, material, lines, points } of shadedMeshes) {
+    mesh.material = showPolygons.value ? material : hiddenMaterial
+    lines.visible = showLines.value
+    points.visible = showPoints.value
   }
   for (const [material, original] of surfaceMaterials) {
-    const combined = shadingMode.value === 'combined'
+    const combined = showPolygons.value && (showLines.value || showPoints.value)
+    const side = doubleSided.value ? THREE.DoubleSide : original.side
+    let changed = material.side !== side
+    material.side = side
     material.polygonOffset = combined || original.enabled
     material.polygonOffsetFactor = combined ? 1 : original.factor
     material.polygonOffsetUnits = combined ? 1 : original.units
+    for (const [key, texture] of original.textures) {
+      const value = showTextures.value ? texture : null
+      if (Reflect.get(material, key) !== value) {
+        Reflect.set(material, key, value)
+        changed = true
+      }
+    }
+    if (changed) material.needsUpdate = true
   }
 }
 
@@ -59,6 +88,15 @@ function prepareShading(model: THREE.Object3D) {
     if (object instanceof THREE.Mesh) meshes.push(object)
   })
   if (meshes.length === 0) return
+  hiddenMaterial = new THREE.MeshBasicMaterial({ visible: false })
+  pointMaterial = new THREE.PointsMaterial({
+    color: 0x000000,
+    size: 3,
+    sizeAttenuation: false,
+    transparent: true,
+    opacity: 0.05,
+    depthWrite: false,
+  })
   const wireMaterial = new THREE.MeshBasicMaterial({
     color: 0x000000,
     wireframe: true,
@@ -67,17 +105,24 @@ function prepareShading(model: THREE.Object3D) {
     depthWrite: false,
   })
   for (const mesh of meshes) {
-    const overlay = new THREE.Mesh(mesh.geometry, wireMaterial)
-    overlay.visible = false
-    overlay.raycast = () => {}
-    mesh.add(overlay)
-    shadedMeshes.push({ mesh, material: mesh.material, overlay })
+    const lines = new THREE.Mesh(mesh.geometry, wireMaterial)
+    const points = new THREE.Points(mesh.geometry, pointMaterial)
+    lines.raycast = () => {}
+    points.raycast = () => {}
+    mesh.add(lines, points)
+    shadedMeshes.push({ mesh, material: mesh.material, lines, points })
     for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
       if (!surfaceMaterials.has(material)) {
+        const textures = new Map<string, THREE.Texture>()
+        for (const [key, value] of Object.entries(material)) {
+          if (value instanceof THREE.Texture) textures.set(key, value)
+        }
         surfaceMaterials.set(material, {
+          side: material.side,
           enabled: material.polygonOffset,
           factor: material.polygonOffsetFactor,
           units: material.polygonOffsetUnits,
+          textures,
         })
       }
     }
@@ -85,10 +130,70 @@ function prepareShading(model: THREE.Object3D) {
   updateShadingMode()
 }
 
-watch(shadingMode, (mode) => {
-  updateShadingMode()
-  localStorage.setItem(STORAGE_KEY_SHADING_MODE, mode)
-})
+for (const [name, toggle] of [
+  ['polygons', showPolygons], ['lines', showLines], ['points', showPoints],
+  ['doubleSided', doubleSided], ['textures', showTextures],
+] as const) {
+  watch(toggle, (value) => {
+    updateShadingMode()
+    localStorage.setItem(`istAssetBrowser.preview.${name}`, String(value))
+  })
+}
+
+function centerOnPolygon(event: MouseEvent) {
+  if (loading.value || !showPolygons.value || !renderer || !controls || !scene) return
+
+  const { left, top, width, height } = renderer.domElement.getBoundingClientRect()
+  if (width === 0 || height === 0) return
+  const pointer = new THREE.Vector2(
+    ((event.clientX - left) / width) * 2 - 1,
+    1 - ((event.clientY - top) / height) * 2,
+  )
+  const camera = controls.object
+  if (!(camera instanceof THREE.PerspectiveCamera)) return
+  camera.updateMatrixWorld()
+  scene.updateMatrixWorld()
+  const raycaster = new THREE.Raycaster()
+  raycaster.setFromCamera(pointer, camera)
+
+  const forward = camera.getWorldDirection(new THREE.Vector3())
+  for (const hit of raycaster.intersectObjects(shadedMeshes.map(({ mesh }) => mesh), false)) {
+    const mesh = hit.object
+    if (!(mesh instanceof THREE.Mesh)) continue
+    const material = Array.isArray(mesh.material) ? mesh.material[hit.face?.materialIndex ?? 0] : mesh.material
+    if (!material?.visible || material.opacity === 0) continue
+    let visible = true
+    for (let object: THREE.Object3D | null = mesh; object; object = object.parent) {
+      if (!object.visible) {
+        visible = false
+        break
+      }
+    }
+    if (!visible) continue
+    const depth = hit.distance * raycaster.ray.direction.dot(forward)
+    if (depth < camera.near || depth > camera.far) continue
+
+    // Pan parallel to the image plane so the picked surface keeps its apparent scale.
+    centering = {
+      startedAt: performance.now(),
+      fromPosition: camera.position.clone(),
+      toPosition: hit.point.clone().addScaledVector(forward, -depth),
+      fromTarget: controls.target.clone(),
+      toTarget: hit.point,
+    }
+    return
+  }
+}
+
+function updateCentering(time: number) {
+  if (!controls || !centering) return
+  const progress = THREE.MathUtils.smoothstep(time - centering.startedAt, 0, CENTER_DURATION_MS)
+  const camera = controls.object
+  camera.position.lerpVectors(centering.fromPosition, centering.toPosition, progress)
+  controls.target.lerpVectors(centering.fromTarget, centering.toTarget, progress)
+  camera.lookAt(controls.target)
+  if (progress === 1) centering = undefined
+}
 
 function disposeRenderer() {
   if (!renderer) return
@@ -124,9 +229,13 @@ function disposeModel(model: THREE.Object3D) {
 }
 
 function releaseViewer() {
+  centering = undefined
   observer?.disconnect()
   controls?.dispose()
   for (const { mesh, material } of shadedMeshes) mesh.material = material
+  for (const [material, original] of surfaceMaterials) {
+    for (const [key, texture] of original.textures) Reflect.set(material, key, texture)
+  }
   shadedMeshes.length = 0
   surfaceMaterials.clear()
   if (scene) {
@@ -134,6 +243,10 @@ function releaseViewer() {
     scene.clear()
     scene = undefined
   }
+  hiddenMaterial?.dispose()
+  pointMaterial?.dispose()
+  hiddenMaterial = undefined
+  pointMaterial = undefined
   disposeRenderer()
   controls = undefined
 }
@@ -163,6 +276,7 @@ async function initialize() {
     scene.add(light)
     controls = new OrbitControls(camera, host)
     controls.enableDamping = true
+    controls.addEventListener('start', () => { centering = undefined })
 
     const resize = () => {
       if (!renderer) return
@@ -175,8 +289,9 @@ async function initialize() {
     observer = new ResizeObserver(resize)
     observer.observe(host)
     resize()
-    renderer.setAnimationLoop(() => {
+    renderer.setAnimationLoop((time) => {
       controls?.update()
+      updateCentering(time)
       if (scene && renderer) renderer.render(scene, camera)
     })
 
@@ -243,19 +358,28 @@ onBeforeUnmount(() => {
     @update:visible="(visible) => { if (!visible) emit('close') }"
     @show="initialize"
   >
-    <div class="shading-toolbar">
-      <Select
-        v-model="shadingMode"
-        :options="shadingModes"
-        optionLabel="label"
-        optionValue="value"
-        aria-label="シェーディングモード"
-        :disabled="loading || !!errorMessage"
-        size="small"
-      />
+    <div class="shading-toolbar" role="group" aria-label="プレビュー表示設定">
+      <button type="button" class="preview-toggle" :class="{ active: showPolygons }" :aria-pressed="showPolygons" aria-label="ポリゴン" title="ポリゴン" :disabled="loading || !!errorMessage" @click="showPolygons = !showPolygons">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 22 20H2Z" fill="currentColor" /></svg>
+      </button>
+      <button type="button" class="preview-toggle" :class="{ active: showLines }" :aria-pressed="showLines" aria-label="ワイヤフレーム" title="ワイヤフレーム" :disabled="loading || !!errorMessage" @click="showLines = !showLines">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 22 20H2Z" fill="none" stroke="currentColor" stroke-width="2" /></svg>
+      </button>
+      <button type="button" class="preview-toggle" :class="{ active: showPoints }" :aria-pressed="showPoints" aria-label="ポイント" title="ポイント" :disabled="loading || !!errorMessage" @click="showPoints = !showPoints">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="4" r="2.5" /><circle cx="4" cy="19" r="2.5" /><circle cx="20" cy="19" r="2.5" /></svg>
+      </button>
+      <button type="button" class="preview-toggle" :class="{ active: doubleSided }" :aria-pressed="doubleSided" aria-label="両面描画" title="両面描画" :disabled="loading || !!errorMessage" @click="doubleSided = !doubleSided">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 3h18v18H3z" transform="translate(2 -2)" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M3 3h18v18H3z" transform="translate(-2 2)" fill="currentColor" />
+        </svg>
+      </button>
+      <button type="button" class="preview-toggle" :class="{ active: showTextures }" :aria-pressed="showTextures" aria-label="テクスチャ" title="テクスチャ" :disabled="loading || !!errorMessage" @click="showTextures = !showTextures">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h18v18H3z" fill="none" stroke="currentColor" stroke-width="2" /><path d="M4 4h8v8H4zm8 8h8v8h-8z" fill="currentColor" /></svg>
+      </button>
     </div>
     <div class="preview-shell">
-      <div ref="viewport" class="preview-viewport" aria-label="3D モデルプレビュー" />
+      <div ref="viewport" class="preview-viewport" aria-label="3D モデルプレビュー" @dblclick="centerOnPolygon" />
       <div v-if="loading" class="preview-overlay" role="status">
         <ProgressSpinner style="width: 40px; height: 40px" strokeWidth="4" />
         <span>モデルを変換・読み込み中...</span>
@@ -264,7 +388,7 @@ onBeforeUnmount(() => {
         <Message severity="error" :closable="false">{{ errorMessage }}</Message>
       </div>
     </div>
-    <div class="preview-help">ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: 移動</div>
+    <div class="preview-help">ドラッグ: 回転 / ホイール: ズーム / 右ドラッグ: 移動 / ポリゴンをダブルクリック: 中心に移動</div>
   </Dialog>
 </template>
 
@@ -275,6 +399,41 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--p-content-border-color);
+  border-radius: 6px;
+  background: var(--p-content-background);
+  color: var(--p-text-muted-color);
+  cursor: pointer;
+}
+
+.preview-toggle.active {
+  background: #add8e6;
+  border-color: #add8e6;
+  color: #172a32;
+}
+
+.preview-toggle:focus-visible {
+  outline: none;
+  filter: brightness(0.85);
+}
+
+.preview-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.preview-toggle svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
 }
 
 .preview-shell {
