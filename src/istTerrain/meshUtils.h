@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/range3f.h>
 #include <pxr/usd/usdGeom/mesh.h>
 
@@ -8,6 +9,12 @@
 
 // Requires AVX2. Empty input returns an empty range; NaN components are ignored.
 GfRange3f FastBounds(std::span<const GfVec3f> points);
+
+// Both require AVX2. Output must hold at least input.size() elements; exact input/output aliasing is supported.
+// Matches GfMatrix4f::Transform, including homogeneous projection (no division for w == 0).
+void FastTransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
+// Matches GfMatrix4f::TransformDir: no translation or homogeneous projection.
+void FastTransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
 
 constexpr int kMaxUvSets = 4;
 

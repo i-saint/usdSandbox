@@ -4,11 +4,151 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstdint>
+#include <cstring>
 #include <immintrin.h>
+#include <type_traits>
 #include <unordered_set>
 
 using float2 = GfVec2f;
 using float3 = GfVec3f;
+
+GfRange3f FastBounds(std::span<const GfVec3f> points)
+{
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
+    __m256 min0 = _mm256_set1_ps(FLT_MAX);
+    __m256 min1 = min0;
+    __m256 min2 = min0;
+    __m256 max0 = _mm256_set1_ps(-FLT_MAX);
+    __m256 max1 = max0;
+    __m256 max2 = max0;
+    size_t i = 0;
+    for (; points.size() - i >= 8; i += 8) {
+        // Three contiguous loads cover eight packed xyz vertices without gathers or overreads.
+        const float* p = points[i].data();
+        const __m256 a = _mm256_loadu_ps(p);
+        const __m256 b = _mm256_loadu_ps(p + 8);
+        const __m256 c = _mm256_loadu_ps(p + 16);
+        // Keep the accumulator as the second operand so NaNs do not replace valid extrema.
+        min0 = _mm256_min_ps(a, min0);
+        min1 = _mm256_min_ps(b, min1);
+        min2 = _mm256_min_ps(c, min2);
+        max0 = _mm256_max_ps(a, max0);
+        max1 = _mm256_max_ps(b, max1);
+        max2 = _mm256_max_ps(c, max2);
+    }
+    alignas(32) float minima[24];
+    alignas(32) float maxima[24];
+    _mm256_store_ps(minima, min0);
+    _mm256_store_ps(minima + 8, min1);
+    _mm256_store_ps(minima + 16, min2);
+    _mm256_store_ps(maxima, max0);
+    _mm256_store_ps(maxima + 8, max1);
+    _mm256_store_ps(maxima + 16, max2);
+    _mm256_zeroupper();
+
+    GfVec3f lower(FLT_MAX);
+    GfVec3f upper(-FLT_MAX);
+    for (size_t j = 0; j < 24; ++j) {
+        const size_t axis = j % 3;
+        if (minima[j] < lower[axis]) lower[axis] = minima[j];
+        if (maxima[j] > upper[axis]) upper[axis] = maxima[j];
+    }
+    GfRange3f bounds(lower, upper);
+    for (; i < points.size(); ++i)
+        bounds.UnionWith(points[i]);
+    return bounds;
+}
+
+
+// Select lanes as if a, b and c were concatenated into a single 24-lane vector.
+template<int... Lanes>
+inline __m256 PermutePacked(__m256 a, __m256 b, __m256 c)
+{
+    const __m256i indices = _mm256_setr_epi32((Lanes % 8)...);
+    constexpr auto mask = [](int source) {
+        constexpr int lanes[] = {Lanes...};
+        int result = 0;
+        for (int i = 0; i < 8; ++i)
+            if (lanes[i] / 8 == source) result |= 1 << i;
+        return result;
+    };
+    constexpr int fromB = mask(1);
+    constexpr int fromC = mask(2);
+    return _mm256_blend_ps(
+        _mm256_blend_ps(_mm256_permutevar8x32_ps(a, indices),
+                        _mm256_permutevar8x32_ps(b, indices), fromB),
+        _mm256_permutevar8x32_ps(c, indices), fromC);
+}
+
+template<bool IsPoint>
+inline void FastTransform(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
+{
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
+    static_assert(std::is_trivially_copyable_v<GfVec3f>);
+    size_t i = 0;
+    if (input.size() >= 8) {
+        constexpr int columns = IsPoint ? 4 : 3;
+        __m256 coeff[IsPoint ? 4 : 3][columns];
+        for (int row = 0; row < (IsPoint ? 4 : 3); ++row)
+            for (int col = 0; col < columns; ++col)
+                coeff[row][col] = _mm256_set1_ps(transform[row][col]);
+
+        for (; input.size() - i >= 8; i += 8) {
+            // Load each block completely before storing, allowing exact input/output aliasing.
+            __m256 packed[3];
+            std::memcpy(packed, input.data() + i, sizeof(packed));
+            const __m256 x = PermutePacked<0, 3, 6, 9, 12, 15, 18, 21>(packed[0], packed[1], packed[2]);
+            const __m256 y = PermutePacked<1, 4, 7, 10, 13, 16, 19, 22>(packed[0], packed[1], packed[2]);
+            const __m256 z = PermutePacked<2, 5, 8, 11, 14, 17, 20, 23>(packed[0], packed[1], packed[2]);
+
+            auto transformColumn = [&](int col) {
+                __m256 value = _mm256_add_ps(_mm256_mul_ps(x, coeff[0][col]),
+                                             _mm256_mul_ps(y, coeff[1][col]));
+                value = _mm256_add_ps(value, _mm256_mul_ps(z, coeff[2][col]));
+                if constexpr (IsPoint)
+                    value = _mm256_add_ps(value, coeff[3][col]);
+                return value;
+            };
+            __m256 tx = transformColumn(0);
+            __m256 ty = transformColumn(1);
+            __m256 tz = transformColumn(2);
+            if constexpr (IsPoint) {
+                const __m256 w = transformColumn(3);
+                const __m256 one = _mm256_set1_ps(1.0f);
+                const __m256 zeroMask = _mm256_cmp_ps(w, _mm256_setzero_ps(), _CMP_EQ_OQ);
+                // GfProject uses a reciprocal of 1 for w == 0.
+                const __m256 invW = _mm256_div_ps(one, _mm256_blendv_ps(w, one, zeroMask));
+                tx = _mm256_mul_ps(invW, tx);
+                ty = _mm256_mul_ps(invW, ty);
+                tz = _mm256_mul_ps(invW, tz);
+            }
+
+            packed[0] = PermutePacked<0, 8, 16, 1, 9, 17, 2, 10>(tx, ty, tz);
+            packed[1] = PermutePacked<18, 3, 11, 19, 4, 12, 20, 5>(tx, ty, tz);
+            packed[2] = PermutePacked<13, 21, 6, 14, 22, 7, 15, 23>(tx, ty, tz);
+            std::memcpy(output.data() + i, packed, sizeof(packed));
+        }
+        _mm256_zeroupper();
+    }
+
+    for (; i < input.size(); ++i) {
+        if constexpr (IsPoint)
+            output[i] = transform.Transform(input[i]);
+        else
+            output[i] = transform.TransformDir(input[i]);
+    }
+}
+
+void FastTransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
+{
+    FastTransform<true>(output, input, transform);
+}
+
+void FastTransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
+{
+    FastTransform<false>(output, input, transform);
+}
+
 
 bool ExtractMeshData(const UsdGeomMesh& mesh, MeshData& dst)
 {
@@ -57,52 +197,6 @@ bool ExtractMeshData(const UsdGeomMesh& mesh, MeshData& dst)
     return true;
 }
 
-GfRange3f FastBounds(std::span<const GfVec3f> points)
-{
-    static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
-    __m256 min0 = _mm256_set1_ps(FLT_MAX);
-    __m256 min1 = min0;
-    __m256 min2 = min0;
-    __m256 max0 = _mm256_set1_ps(-FLT_MAX);
-    __m256 max1 = max0;
-    __m256 max2 = max0;
-    size_t i = 0;
-    for (; points.size() - i >= 8; i += 8) {
-        // Three contiguous loads cover eight packed xyz vertices without gathers or overreads.
-        const float* p = points[i].data();
-        const __m256 a = _mm256_loadu_ps(p);
-        const __m256 b = _mm256_loadu_ps(p + 8);
-        const __m256 c = _mm256_loadu_ps(p + 16);
-        // Keep the accumulator as the second operand so NaNs do not replace valid extrema.
-        min0 = _mm256_min_ps(a, min0);
-        min1 = _mm256_min_ps(b, min1);
-        min2 = _mm256_min_ps(c, min2);
-        max0 = _mm256_max_ps(a, max0);
-        max1 = _mm256_max_ps(b, max1);
-        max2 = _mm256_max_ps(c, max2);
-    }
-    alignas(32) float minima[24];
-    alignas(32) float maxima[24];
-    _mm256_store_ps(minima, min0);
-    _mm256_store_ps(minima + 8, min1);
-    _mm256_store_ps(minima + 16, min2);
-    _mm256_store_ps(maxima, max0);
-    _mm256_store_ps(maxima + 8, max1);
-    _mm256_store_ps(maxima + 16, max2);
-    _mm256_zeroupper();
-
-    GfVec3f lower(FLT_MAX);
-    GfVec3f upper(-FLT_MAX);
-    for (size_t j = 0; j < 24; ++j) {
-        const size_t axis = j % 3;
-        if (minima[j] < lower[axis]) lower[axis] = minima[j];
-        if (maxima[j] > upper[axis]) upper[axis] = maxima[j];
-    }
-    GfRange3f bounds(lower, upper);
-    for (; i < points.size(); ++i)
-        bounds.UnionWith(points[i]);
-    return bounds;
-}
 
 class MeshRefiner::IAttribute
 {

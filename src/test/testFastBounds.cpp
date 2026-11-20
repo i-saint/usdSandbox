@@ -2,6 +2,7 @@
 #include "../istTerrain/meshUtils.h"
 
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <new>
@@ -26,6 +27,69 @@ static bool Verify(std::span<const GfVec3f> points)
     return true;
 }
 
+static const GfMatrix4f kProjective(
+     2.0f,  1.0f, -3.0f, 1.0f,
+    -1.0f,  3.0f,  2.0f, 0.0f,
+     4.0f, -2.0f,  0.5f, 0.0f,
+     5.0f,  7.0f, -9.0f, 0.0f);
+
+static bool VerifyTransforms(std::span<GfVec3f> points, const GfMatrix4f& transform)
+{
+    const std::vector<GfVec3f> original(points.begin(), points.end());
+    std::vector<GfVec3f> output(points.size());
+    const auto verify = [&](std::span<const GfVec3f> expectedInput, std::span<const GfVec3f> actual,
+                            bool isPoint, const char* mode) {
+        for (size_t i = 0; i < actual.size(); ++i) {
+            const GfVec3f expected = isPoint ? transform.Transform(expectedInput[i]) : transform.TransformDir(expectedInput[i]);
+            for (size_t axis = 0; axis < 3; ++axis) {
+                if (actual[i][axis] != expected[axis] &&
+                    !(std::isnan(actual[i][axis]) && std::isnan(expected[axis]))) {
+                    std::cerr << (isPoint ? "Point" : "Vector") << " transform mismatch (" << mode << ") at vertex "
+                              << i << ", axis " << axis << " for " << actual.size() << " vertices\n";
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    for (bool isPoint : {true, false}) {
+        if (isPoint)
+            FastTransformPoints(output, original, transform);
+        else
+            FastTransformVectors(output, original, transform);
+        if (!verify(original, output, isPoint, "separate buffers")) return false;
+
+        std::copy(original.begin(), original.end(), points.begin());
+        const std::span<const GfVec3f> input(points.data(), points.size());
+        if (isPoint)
+            FastTransformPoints(points, input, transform);
+        else
+            FastTransformVectors(points, input, transform);
+        if (!verify(original, points, isPoint, "aliased buffers")) return false;
+    }
+    std::copy(original.begin(), original.end(), points.begin());
+    return true;
+}
+
+static bool TestTransforms()
+{
+    GfMatrix4f affine = kProjective;
+    affine[0][3] = 0.0f;
+    affine[3][3] = 1.0f;
+    GfVec3f points[25];
+    for (int i = 0; i < 25; ++i)
+        points[i] = GfVec3f(float(i % 7 - 3), float(i - 8), float(i % 5 - 2));
+    points[2][0] = std::numeric_limits<float>::infinity();
+    points[10][1] = std::numeric_limits<float>::quiet_NaN();
+    for (const GfMatrix4f& transform : {GfMatrix4f(1.0f), affine, kProjective}) {
+        for (size_t count = 0; count <= 24; ++count) {
+            if (!VerifyTransforms({points + 1, count}, transform)) return false;
+        }
+    }
+    return true;
+}
+
 static bool TestPageBoundary()
 {
     SYSTEM_INFO info;
@@ -45,7 +109,7 @@ static bool TestPageBoundary()
         auto* points = reinterpret_cast<GfVec3f*>(boundary - count * sizeof(GfVec3f));
         for (size_t i = 0; i < count; ++i)
             new (points + i) GfVec3f(float(i), -float(i), float(i % 7));
-        ok = Verify({points, count});
+        ok = Verify({points, count}) && VerifyTransforms({points, count}, kProjective);
         for (size_t i = 0; i < count; ++i)
             points[i].~GfVec3f();
     }
@@ -58,7 +122,7 @@ static bool TestPageBoundary()
 
 int main()
 {
-    if (!Verify({}) || !TestPageBoundary()) return 1;
+    if (!TestTransforms() || !Verify({}) || !TestPageBoundary()) return 1;
     std::mt19937 random(0x4132);
     std::uniform_real_distribution<float> distribution(-10000.0f, 10000.0f);
     std::vector<GfVec3f> points(1024 * 1024);
@@ -101,6 +165,7 @@ int main()
     };
     const double referenceMs = benchmark(ReferenceBounds);
     const double fastMs = benchmark(FastBounds);
-    std::cout << "FastBounds tests passed\nReference: " << referenceMs << " ms, FastBounds: " << fastMs << " ms\n";
+    std::cout << "FastBounds and FastTransform tests passed\nReference: " << referenceMs
+              << " ms, FastBounds: " << fastMs << " ms\n";
     return 0;
 }
