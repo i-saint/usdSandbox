@@ -1,8 +1,11 @@
 ﻿#include "../istTerrain/pch.h"
 #include "../istTerrain/meshUtils.h"
 
+#include <pxr/base/tf/errorMark.h>
+
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <new>
@@ -69,6 +72,122 @@ static bool VerifyTransforms(std::span<GfVec3f> points, const GfMatrix4f& transf
         if (!verify(original, points, isPoint, "aliased buffers")) return false;
     }
     std::copy(original.begin(), original.end(), points.begin());
+    return true;
+}
+
+template<class Pixel>
+__declspec(noinline) static void ReferenceNormalMap(std::span<RGBu8> output, std::span<const Pixel> input)
+{
+    for (size_t i = 0; i < input.size(); ++i) {
+        uint8_t x, y;
+        if constexpr (std::is_same_v<Pixel, RGu8>) {
+            x = input[i].r;
+            y = input[i].g;
+        }
+        else {
+            x = input[i].g;
+            y = input[i].a;
+        }
+        const int sx = 2 * static_cast<int>(x) - 255;
+        const int sy = 2 * static_cast<int>(y) - 255;
+        const int squaredZ = std::max(0, 255 * 255 - sx * sx - sy * sy);
+        output[i] = {x, y, static_cast<uint8_t>((255 + static_cast<int>(std::sqrt(static_cast<float>(squaredZ)))) / 2)};
+    }
+}
+
+static bool TestNormalMaps()
+{
+    constexpr size_t count = 256 * 256;
+    std::vector<RGu8> rg(count);
+    std::vector<RGBAu8> rgba(count);
+    for (size_t i = 0; i < count; ++i) {
+        rg[i] = {static_cast<uint8_t>(i / 256), static_cast<uint8_t>(i % 256)};
+        rgba[i] = {17, rg[i].r, 239, rg[i].g};
+    }
+
+    const auto verify = [&](std::span<const RGBu8> result) {
+        for (size_t i = 0; i < count; ++i) {
+            const int sx = 2 * static_cast<int>(rg[i].r) - 255;
+            const int sy = 2 * static_cast<int>(rg[i].g) - 255;
+            const int remaining = std::max(0, 65025 - sx * sx - sy * sy);
+            const int expectedZ = static_cast<int>((255.0 + std::sqrt(static_cast<double>(remaining))) / 2.0);
+            if (result[i].r != rg[i].r || result[i].g != rg[i].g || result[i].b != expectedZ) {
+                std::cerr << "Normal map mismatch at " << i << "\n";
+                return false;
+            }
+        }
+        return true;
+    };
+
+    std::vector<RGBu8> output(count + 1, {42, 43, 44});
+    ReconstructNormalMapRG8(output, rg);
+    if (!verify(output) || output.back().r != 42 || output.back().g != 43 || output.back().b != 44) return false;
+    ReconstructNormalMapGA8(output, rgba);
+    if (!verify(output) || output.back().r != 42 || output.back().g != 43 || output.back().b != 44) return false;
+
+    std::vector<RGBu8> inPlaceRG(count);
+    std::memcpy(inPlaceRG.data(), rg.data(), count * sizeof(RGu8));
+    ReconstructNormalMapRG8(inPlaceRG, {reinterpret_cast<const RGu8*>(inPlaceRG.data()), count});
+    if (!verify(inPlaceRG)) return false;
+    std::vector<RGBAu8> inPlaceGA = rgba;
+    auto* inPlaceGAOutput = reinterpret_cast<RGBu8*>(inPlaceGA.data());
+    ReconstructNormalMapGA8({inPlaceGAOutput, count}, inPlaceGA);
+    std::memcpy(output.data(), inPlaceGA.data(), count * sizeof(RGBu8));
+    if (!verify(output)) return false;
+
+    for (size_t n = 0; n <= 33; ++n) {
+        std::vector<RGBu8> expected(n + 1, {91, 92, 93});
+        const std::span<const RGu8> src(rg.data() + 127, n);
+        ReconstructNormalMapRG8(expected, src);
+        std::vector<RGBu8> expanded(n + 1, {91, 92, 93});
+        std::memcpy(expanded.data(), src.data(), n * sizeof(RGu8));
+        ReconstructNormalMapRG8(std::span<RGBu8>(expanded.data(), n),
+            {reinterpret_cast<const RGu8*>(expanded.data()), n});
+        if (std::memcmp(expected.data(), expanded.data(), (n + 1) * sizeof(RGBu8)) != 0) {
+            std::cerr << "In-place RG mismatch for " << n << " pixels\n";
+            return false;
+        }
+        std::vector<RGBAu8> compressed(rgba.begin() + 127, rgba.begin() + 127 + n);
+        auto* dst = reinterpret_cast<RGBu8*>(compressed.data());
+        ReconstructNormalMapGA8({dst, n}, compressed);
+        if (n != 0 && std::memcmp(expected.data(), compressed.data(), n * sizeof(RGBu8)) != 0) {
+            std::cerr << "In-place GA mismatch for " << n << " pixels\n";
+            return false;
+        }
+    }
+
+    ReconstructNormalMapRG8({}, {});
+    ReconstructNormalMapGA8({}, {});
+    for (bool ga : {false, true}) {
+        RGBu8 result[] = {{91, 92, 93}};
+        const RGu8 rgInput[] = {{1, 2}, {3, 4}};
+        const RGBAu8 rgbaInput[] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
+        TfErrorMark errors;
+        if (ga)
+            ReconstructNormalMapGA8(result, rgbaInput);
+        else
+            ReconstructNormalMapRG8(result, rgInput);
+        if (errors.IsClean() || result[0].r != 91 || result[0].g != 92 || result[0].b != 93) {
+            std::cerr << "Insufficient normal map output was not rejected\n";
+            return false;
+        }
+        errors.Clear();
+    }
+
+    const auto benchmark = [&](auto function, auto input) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 128; ++i)
+            function(std::span<RGBu8>(output.data(), count), input);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
+    const std::span<const RGu8> rgInput = rg;
+    const std::span<const RGBAu8> rgbaInput = rgba;
+    const double rgReference = benchmark(ReferenceNormalMap<RGu8>, rgInput);
+    const double rgAvx = benchmark(ReconstructNormalMapRG8, rgInput);
+    const double gaReference = benchmark(ReferenceNormalMap<RGBAu8>, rgbaInput);
+    const double gaAvx = benchmark(ReconstructNormalMapGA8, rgbaInput);
+    std::cout << "Normal maps, scalar / AVX2: RG " << rgReference << " / " << rgAvx
+              << " ms, GA " << gaReference << " / " << gaAvx << " ms\n";
     return true;
 }
 
@@ -262,6 +381,47 @@ static bool TestTangents()
     return true;
 }
 
+static bool TestNormalMapPageBoundary()
+{
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    const size_t pageSize = info.dwPageSize;
+    auto* memory = static_cast<unsigned char*>(VirtualAlloc(nullptr, pageSize * 4, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!memory) { std::cerr << "VirtualAlloc failed\n"; return false; }
+    DWORD previous;
+    if (!VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &previous) ||
+        !VirtualProtect(memory + pageSize * 3, pageSize, PAGE_NOACCESS, &previous)) {
+        std::cerr << "VirtualProtect failed\n";
+        VirtualFree(memory, 0, MEM_RELEASE);
+        return false;
+    }
+    auto* sourceEnd = memory + pageSize;
+    auto* outputEnd = memory + pageSize * 3;
+    bool ok = true;
+    for (size_t count = 0; count <= 33 && ok; ++count) {
+        auto* output = reinterpret_cast<RGBu8*>(outputEnd - count * sizeof(RGBu8));
+        auto* rg = reinterpret_cast<RGu8*>(sourceEnd - count * sizeof(RGu8));
+        for (size_t i = 0; i < count; ++i)
+            new (rg + i) RGu8{static_cast<uint8_t>(i * 7), static_cast<uint8_t>(255 - i * 5)};
+        std::vector<RGBu8> expected(count);
+        ReferenceNormalMap<RGu8>(expected, {rg, count});
+        ReconstructNormalMapRG8({output, count}, {rg, count});
+        ok = count == 0 || std::memcmp(output, expected.data(), count * sizeof(RGBu8)) == 0;
+
+        auto* rgba = reinterpret_cast<RGBAu8*>(sourceEnd - count * sizeof(RGBAu8));
+        for (size_t i = 0; i < count; ++i)
+            new (rgba + i) RGBAu8{0, static_cast<uint8_t>(i * 7), 0, static_cast<uint8_t>(255 - i * 5)};
+        ReconstructNormalMapGA8({output, count}, {rgba, count});
+        ok = ok && (count == 0 || std::memcmp(output, expected.data(), count * sizeof(RGBu8)) == 0);
+    }
+    if (!VirtualFree(memory, 0, MEM_RELEASE)) {
+        std::cerr << "VirtualFree failed\n";
+        return false;
+    }
+    if (!ok) std::cerr << "Normal map page boundary mismatch\n";
+    return ok;
+}
+
 static bool TestPageBoundary()
 {
     SYSTEM_INFO info;
@@ -294,7 +454,8 @@ static bool TestPageBoundary()
 
 int main()
 {
-    if (!TestNormalizeVectors() || !TestLerp() || !TestTransforms() || !TestTangents() || !Verify({}) || !TestPageBoundary()) return 1;
+    if (!TestNormalMaps() || !TestNormalMapPageBoundary() || !TestNormalizeVectors() || !TestLerp() ||
+        !TestTransforms() || !TestTangents() || !Verify({}) || !TestPageBoundary()) return 1;
     std::mt19937 random(0x4132);
     std::uniform_real_distribution<float> distribution(-10000.0f, 10000.0f);
     std::vector<GfVec3f> points(1024 * 1024);

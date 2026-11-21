@@ -4,6 +4,7 @@
 #include <pxr/base/gf/range3f.h>
 #include <pxr/usd/usdGeom/mesh.h>
 
+#include <cstdint>
 #include <memory>
 #include <span>
 
@@ -32,6 +33,20 @@ void GenerateTangentsTriangleIndexed(std::span<GfVec4f> output,
 void GenerateTangentsTriangleIndexed(std::span<GfVec3f> output,
     std::span<const GfVec3f> vertices, std::span<const GfVec2f> uvs,
     std::span<const GfVec3f> normals, std::span<const int> indices);
+
+
+struct RGu8 { uint8_t r, g; };
+struct RGBu8 { uint8_t r, g, b; };
+struct RGBAu8 { uint8_t r, g, b, a; };
+static_assert(sizeof(RGu8) == 2 && sizeof(RGBu8) == 3 && sizeof(RGBAu8) == 4);
+
+// Requires AVX2. Reconstruct RGB UNORM8 from RG or RGBA (G = X, A = Y) UNORM8 pixels.
+// Z = sqrt(max(0, 1 - X*X - Y*Y)), encoded as UNORM8 by truncation.
+// Output must hold input.size() pixels. Equal starting addresses are supported; other overlaps are not.
+// Insufficient output causes a runtime diagnostic and leaves output unchanged.
+void ReconstructNormalMapRG8(std::span<RGBu8> output, std::span<const RGu8> input);
+void ReconstructNormalMapGA8(std::span<RGBu8> output, std::span<const RGBAu8> input);
+
 
 constexpr int kMaxUvSets = 4;
 

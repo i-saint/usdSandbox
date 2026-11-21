@@ -5,6 +5,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <immintrin.h>
@@ -87,7 +88,7 @@ void NormalizeVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input)
     static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
     size_t i = 0;
     if (input.size() >= 8) {
-        const __m256 epsilon = _mm256_set1_ps(GF_MIN_VECTOR_LENGTH);
+        const __m256 epsilon = _mm256_set1_ps((float)GF_MIN_VECTOR_LENGTH);
         for (; input.size() - i >= 8; i += 8) {
             __m256 packed[3];
             std::memcpy(packed, input.data() + i, sizeof(packed));
@@ -447,6 +448,86 @@ void GenerateTangentsTriangleIndexed(std::span<GfVec3f> output,
     std::span<const GfVec3f> normals, std::span<const int> indices)
 {
     GenerateTangentsTriangleIndexedImpl(output, vertices, uvs, normals, indices);
+}
+
+
+template<class Pixel, size_t XOffset, size_t YOffset>
+inline void ReconstructNormalMap(std::span<RGBu8> output, std::span<const Pixel> input)
+{
+    if (output.size() < input.size()) {
+        TF_RUNTIME_ERROR("Normal map output must hold at least as many pixels as the input");
+        return;
+    }
+
+    const size_t count = input.size();
+    const auto source = std::as_bytes(input);
+    const auto destination = std::as_writable_bytes(output);
+    const auto convertPixel = [&](size_t i) {
+        const uint8_t x = std::to_integer<uint8_t>(source[i * sizeof(Pixel) + XOffset]);
+        const uint8_t y = std::to_integer<uint8_t>(source[i * sizeof(Pixel) + YOffset]);
+        const int sx = 2 * static_cast<int>(x) - 255;
+        const int sy = 2 * static_cast<int>(y) - 255;
+        const int squaredZ = std::max(0, 255 * 255 - sx * sx - sy * sy);
+        const int z = (255 + static_cast<int>(std::sqrt(static_cast<float>(squaredZ)))) / 2;
+        destination[3 * i] = static_cast<std::byte>(x);
+        destination[3 * i + 1] = static_cast<std::byte>(y);
+        destination[3 * i + 2] = static_cast<std::byte>(z);
+        };
+
+    const auto convertBlock = [&](size_t i) {
+        __m256i pixels;
+        if constexpr (sizeof(Pixel) == 2) {
+            __m128i packed;
+            std::memcpy(&packed, source.data() + i * 2, sizeof(packed));
+            pixels = _mm256_cvtepu16_epi32(packed);
+        }
+        else {
+            std::memcpy(&pixels, source.data() + i * 4, sizeof(pixels));
+        }
+        const __m256i mask = _mm256_set1_epi32(255);
+        const __m256i x = _mm256_and_si256(_mm256_srli_epi32(pixels, XOffset * 8), mask);
+        const __m256i y = _mm256_and_si256(_mm256_srli_epi32(pixels, YOffset * 8), mask);
+        const __m256i sx = _mm256_sub_epi32(_mm256_slli_epi32(x, 1), mask);
+        const __m256i sy = _mm256_sub_epi32(_mm256_slli_epi32(y, 1), mask);
+        __m256i squaredZ = _mm256_sub_epi32(_mm256_set1_epi32(255 * 255), _mm256_mullo_epi32(sx, sx));
+        squaredZ = _mm256_max_epi32(_mm256_sub_epi32(squaredZ, _mm256_mullo_epi32(sy, sy)), _mm256_setzero_si256());
+        const __m256i root = _mm256_cvttps_epi32(_mm256_sqrt_ps(_mm256_cvtepi32_ps(squaredZ)));
+        const __m256i z = _mm256_srli_epi32(_mm256_add_epi32(root, mask), 1);
+        const __m256i rgb = _mm256_or_si256(x, _mm256_or_si256(_mm256_slli_epi32(y, 8), _mm256_slli_epi32(z, 16)));
+        const __m128i shuffle = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
+        const __m128i low = _mm_shuffle_epi8(_mm256_castsi256_si128(rgb), shuffle);
+        const __m128i high = _mm_shuffle_epi8(_mm256_extracti128_si256(rgb, 1), shuffle);
+        std::memcpy(destination.data() + i * 3, &low, 12);
+        std::memcpy(destination.data() + i * 3 + 12, &high, 12);
+        };
+
+    if constexpr (sizeof(Pixel) < sizeof(RGBu8)) {
+        if (destination.data() == source.data()) {
+            size_t i = count;
+            for (; i >= 8; i -= 8)
+                convertBlock(i - 8);
+            _mm256_zeroupper();
+            while (i != 0)
+                convertPixel(--i);
+            return;
+        }
+    }
+    size_t i = 0;
+    for (; count - i >= 8; i += 8)
+        convertBlock(i);
+    _mm256_zeroupper();
+    for (; i < count; ++i)
+        convertPixel(i);
+}
+
+void ReconstructNormalMapRG8(std::span<RGBu8> output, std::span<const RGu8> input)
+{
+    ReconstructNormalMap<RGu8, 0, 1>(output, input);
+}
+
+void ReconstructNormalMapGA8(std::span<RGBu8> output, std::span<const RGBAu8> input)
+{
+    ReconstructNormalMap<RGBAu8, 1, 3>(output, input);
 }
 
 
