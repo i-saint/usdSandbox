@@ -120,28 +120,28 @@ static bool TestNormalMaps()
     };
 
     std::vector<RGBu8> output(count + 1, {42, 43, 44});
-    ReconstructNormalMapRG8(output, rg);
+    ReconstructNormalMapRGu8(output, rg);
     if (!verify(output) || output.back().r != 42 || output.back().g != 43 || output.back().b != 44) return false;
-    ReconstructNormalMapGA8(output, rgba);
+    ReconstructNormalMapGAu8(output, rgba);
     if (!verify(output) || output.back().r != 42 || output.back().g != 43 || output.back().b != 44) return false;
 
     std::vector<RGBu8> inPlaceRG(count);
     std::memcpy(inPlaceRG.data(), rg.data(), count * sizeof(RGu8));
-    ReconstructNormalMapRG8(inPlaceRG, {reinterpret_cast<const RGu8*>(inPlaceRG.data()), count});
+    ReconstructNormalMapRGu8(inPlaceRG, {reinterpret_cast<const RGu8*>(inPlaceRG.data()), count});
     if (!verify(inPlaceRG)) return false;
     std::vector<RGBAu8> inPlaceGA = rgba;
     auto* inPlaceGAOutput = reinterpret_cast<RGBu8*>(inPlaceGA.data());
-    ReconstructNormalMapGA8({inPlaceGAOutput, count}, inPlaceGA);
+    ReconstructNormalMapGAu8({inPlaceGAOutput, count}, inPlaceGA);
     std::memcpy(output.data(), inPlaceGA.data(), count * sizeof(RGBu8));
     if (!verify(output)) return false;
 
     for (size_t n = 0; n <= 33; ++n) {
         std::vector<RGBu8> expected(n + 1, {91, 92, 93});
         const std::span<const RGu8> src(rg.data() + 127, n);
-        ReconstructNormalMapRG8(expected, src);
+        ReconstructNormalMapRGu8(expected, src);
         std::vector<RGBu8> expanded(n + 1, {91, 92, 93});
         std::memcpy(expanded.data(), src.data(), n * sizeof(RGu8));
-        ReconstructNormalMapRG8(std::span<RGBu8>(expanded.data(), n),
+        ReconstructNormalMapRGu8(std::span<RGBu8>(expanded.data(), n),
             {reinterpret_cast<const RGu8*>(expanded.data()), n});
         if (std::memcmp(expected.data(), expanded.data(), (n + 1) * sizeof(RGBu8)) != 0) {
             std::cerr << "In-place RG mismatch for " << n << " pixels\n";
@@ -149,24 +149,24 @@ static bool TestNormalMaps()
         }
         std::vector<RGBAu8> compressed(rgba.begin() + 127, rgba.begin() + 127 + n);
         auto* dst = reinterpret_cast<RGBu8*>(compressed.data());
-        ReconstructNormalMapGA8({dst, n}, compressed);
+        ReconstructNormalMapGAu8({dst, n}, compressed);
         if (n != 0 && std::memcmp(expected.data(), compressed.data(), n * sizeof(RGBu8)) != 0) {
             std::cerr << "In-place GA mismatch for " << n << " pixels\n";
             return false;
         }
     }
 
-    ReconstructNormalMapRG8({}, {});
-    ReconstructNormalMapGA8({}, {});
+    ReconstructNormalMapRGu8({}, {});
+    ReconstructNormalMapGAu8({}, {});
     for (bool ga : {false, true}) {
         RGBu8 result[] = {{91, 92, 93}};
         const RGu8 rgInput[] = {{1, 2}, {3, 4}};
         const RGBAu8 rgbaInput[] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
         TfErrorMark errors;
         if (ga)
-            ReconstructNormalMapGA8(result, rgbaInput);
+            ReconstructNormalMapGAu8(result, rgbaInput);
         else
-            ReconstructNormalMapRG8(result, rgInput);
+            ReconstructNormalMapRGu8(result, rgInput);
         if (errors.IsClean() || result[0].r != 91 || result[0].g != 92 || result[0].b != 93) {
             std::cerr << "Insufficient normal map output was not rejected\n";
             return false;
@@ -183,11 +183,72 @@ static bool TestNormalMaps()
     const std::span<const RGu8> rgInput = rg;
     const std::span<const RGBAu8> rgbaInput = rgba;
     const double rgReference = benchmark(ReferenceNormalMap<RGu8>, rgInput);
-    const double rgAvx = benchmark(ReconstructNormalMapRG8, rgInput);
+    const double rgAvx = benchmark(ReconstructNormalMapRGu8, rgInput);
     const double gaReference = benchmark(ReferenceNormalMap<RGBAu8>, rgbaInput);
-    const double gaAvx = benchmark(ReconstructNormalMapGA8, rgbaInput);
+    const double gaAvx = benchmark(ReconstructNormalMapGAu8, rgbaInput);
     std::cout << "Normal maps, scalar / AVX2: RG " << rgReference << " / " << rgAvx
               << " ms, GA " << gaReference << " / " << gaAvx << " ms\n";
+    return true;
+}
+
+static bool TestHalfNormalMaps()
+{
+    constexpr size_t count = 65536;
+    std::vector<RGf16> rg(count);
+    std::vector<RGBAf16> rgba(count);
+    for (size_t i = 0; i < count; ++i) {
+        rg[i] = {GfHalf(static_cast<float>(i / 256) / 255.0f), GfHalf(static_cast<float>(i % 256) / 255.0f)};
+        rgba[i] = {GfHalf(0.25f), rg[i].r, GfHalf(0.75f), rg[i].g};
+    }
+    const auto verify = [&](std::span<const RGBf16> result, std::span<const RGf16> source) {
+        for (size_t i = 0; i < source.size(); ++i) {
+            const float x = 2.0f * static_cast<float>(source[i].r) - 1.0f;
+            const float y = 2.0f * static_cast<float>(source[i].g) - 1.0f;
+            const float squaredZ = std::max(0.0f, 1.0f - x * x - y * y);
+            const GfHalf z((std::sqrt(squaredZ) + 1.0f) * 0.5f);
+            if (result[i].r.bits() != source[i].r.bits() || result[i].g.bits() != source[i].g.bits() ||
+                result[i].b.bits() != z.bits()) {
+                std::cerr << "Half normal map mismatch at " << i << " of " << source.size() << "\n";
+                return false;
+            }
+        }
+        return true;
+    };
+    std::vector<RGBf16> result(count + 1, {GfHalf(0.25f), GfHalf(0.5f), GfHalf(0.75f)});
+    ReconstructNormalMapRGf16(result, rg);
+    if (!verify(result, rg) || result.back().b != GfHalf(0.75f)) return false;
+    ReconstructNormalMapGAf16(result, rgba);
+    if (!verify(result, rg) || result.back().b != GfHalf(0.75f)) return false;
+
+    for (size_t n = 0; n <= 33; ++n) {
+        const std::span<const RGf16> source(rg.data() + 257, n);
+        std::vector<RGBf16> expanded(n + 1, {GfHalf(0.25f), GfHalf(0.5f), GfHalf(0.75f)});
+        std::memcpy(expanded.data(), source.data(), n * sizeof(RGf16));
+        ReconstructNormalMapRGf16({expanded.data(), n}, {reinterpret_cast<const RGf16*>(expanded.data()), n});
+        if (!verify(expanded, source) || expanded.back().b != GfHalf(0.75f)) return false;
+        std::vector<RGBAf16> compressed(rgba.begin() + 257, rgba.begin() + 257 + n);
+        ReconstructNormalMapGAf16({reinterpret_cast<RGBf16*>(compressed.data()), n}, compressed);
+        std::vector<RGBf16> decoded(n);
+        if (n != 0) std::memcpy(decoded.data(), compressed.data(), n * sizeof(RGBf16));
+        if (!verify(decoded, source)) return false;
+        ReconstructNormalMapRGf16({result.data(), n}, source);
+        if (!verify({result.data(), n}, source)) return false;
+    }
+    ReconstructNormalMapRGf16({}, {});
+    ReconstructNormalMapGAf16({}, {});
+    for (bool ga : {false, true}) {
+        RGBf16 output[] = {{GfHalf(0.25f), GfHalf(0.5f), GfHalf(0.75f)}};
+        TfErrorMark errors;
+        if (ga)
+            ReconstructNormalMapGAf16(output, {rgba.data(), 2});
+        else
+            ReconstructNormalMapRGf16(output, {rg.data(), 2});
+        if (errors.IsClean() || output[0].r != GfHalf(0.25f) || output[0].g != GfHalf(0.5f) || output[0].b != GfHalf(0.75f)) {
+            std::cerr << "Insufficient half normal map output was not rejected\n";
+            return false;
+        }
+        errors.Clear();
+    }
     return true;
 }
 
@@ -405,14 +466,33 @@ static bool TestNormalMapPageBoundary()
             new (rg + i) RGu8{static_cast<uint8_t>(i * 7), static_cast<uint8_t>(255 - i * 5)};
         std::vector<RGBu8> expected(count);
         ReferenceNormalMap<RGu8>(expected, {rg, count});
-        ReconstructNormalMapRG8({output, count}, {rg, count});
+        ReconstructNormalMapRGu8({output, count}, {rg, count});
         ok = count == 0 || std::memcmp(output, expected.data(), count * sizeof(RGBu8)) == 0;
 
         auto* rgba = reinterpret_cast<RGBAu8*>(sourceEnd - count * sizeof(RGBAu8));
         for (size_t i = 0; i < count; ++i)
             new (rgba + i) RGBAu8{0, static_cast<uint8_t>(i * 7), 0, static_cast<uint8_t>(255 - i * 5)};
-        ReconstructNormalMapGA8({output, count}, {rgba, count});
+        ReconstructNormalMapGAu8({output, count}, {rgba, count});
         ok = ok && (count == 0 || std::memcmp(output, expected.data(), count * sizeof(RGBu8)) == 0);
+
+        auto* halfOutput = reinterpret_cast<RGBf16*>(outputEnd - count * sizeof(RGBf16));
+        auto* halfRg = reinterpret_cast<RGf16*>(sourceEnd - count * sizeof(RGf16));
+        std::vector<RGBf16> halfExpected(count);
+        for (size_t i = 0; i < count; ++i) {
+            const GfHalf x(static_cast<float>(i) / 64.0f);
+            const GfHalf y(0.5f);
+            new (halfRg + i) RGf16{x, y};
+            const float sx = 2.0f * static_cast<float>(x) - 1.0f;
+            const float sy = 2.0f * static_cast<float>(y) - 1.0f;
+            halfExpected[i] = {x, y, GfHalf((std::sqrt(std::max(0.0f, 1.0f - sx * sx - sy * sy)) + 1.0f) * 0.5f)};
+        }
+        ReconstructNormalMapRGf16({halfOutput, count}, {halfRg, count});
+        ok = ok && (count == 0 || std::memcmp(halfOutput, halfExpected.data(), count * sizeof(RGBf16)) == 0);
+        auto* halfRgba = reinterpret_cast<RGBAf16*>(sourceEnd - count * sizeof(RGBAf16));
+        for (size_t i = 0; i < count; ++i)
+            new (halfRgba + i) RGBAf16{GfHalf(0.0f), GfHalf(static_cast<float>(i) / 64.0f), GfHalf(0.0f), GfHalf(0.5f)};
+        ReconstructNormalMapGAf16({halfOutput, count}, {halfRgba, count});
+        ok = ok && (count == 0 || std::memcmp(halfOutput, halfExpected.data(), count * sizeof(RGBf16)) == 0);
     }
     if (!VirtualFree(memory, 0, MEM_RELEASE)) {
         std::cerr << "VirtualFree failed\n";
@@ -454,7 +534,7 @@ static bool TestPageBoundary()
 
 int main()
 {
-    if (!TestNormalMaps() || !TestNormalMapPageBoundary() || !TestNormalizeVectors() || !TestLerp() ||
+    if (!TestNormalMaps() || !TestHalfNormalMaps() || !TestNormalMapPageBoundary() || !TestNormalizeVectors() || !TestLerp() ||
         !TestTransforms() || !TestTangents() || !Verify({}) || !TestPageBoundary()) return 1;
     std::mt19937 random(0x4132);
     std::uniform_real_distribution<float> distribution(-10000.0f, 10000.0f);

@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <pxr/base/gf/half.h>
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/range3f.h>
 #include <pxr/usd/usdGeom/mesh.h>
@@ -44,8 +45,19 @@ static_assert(sizeof(RGu8) == 2 && sizeof(RGBu8) == 3 && sizeof(RGBAu8) == 4);
 // Z = sqrt(max(0, 1 - X*X - Y*Y)), encoded as UNORM8 by truncation.
 // Output must hold input.size() pixels. Equal starting addresses are supported; other overlaps are not.
 // Insufficient output causes a runtime diagnostic and leaves output unchanged.
-void ReconstructNormalMapRG8(std::span<RGBu8> output, std::span<const RGu8> input);
-void ReconstructNormalMapGA8(std::span<RGBu8> output, std::span<const RGBAu8> input);
+void ReconstructNormalMapRGu8(std::span<RGBu8> output, std::span<const RGu8> input);
+void ReconstructNormalMapGAu8(std::span<RGBu8> output, std::span<const RGBAu8> input);
+
+struct RGf16 { GfHalf r, g; };
+struct RGBf16 { GfHalf r, g, b; };
+struct RGBAf16 { GfHalf r, g, b, a; };
+static_assert(sizeof(RGf16) == 2 * sizeof(GfHalf) && sizeof(RGBf16) == 3 * sizeof(GfHalf) && sizeof(RGBAf16) == 4 * sizeof(GfHalf));
+
+// Requires AVX2. Half components use the same [0, 1] encoding and positive-Z reconstruction.
+// Output must hold input.size() pixels. Equal starting addresses are supported; other overlaps are not.
+// Insufficient output causes a runtime diagnostic and leaves output unchanged.
+void ReconstructNormalMapRGf16(std::span<RGBf16> output, std::span<const RGf16> input);
+void ReconstructNormalMapGAf16(std::span<RGBf16> output, std::span<const RGBAf16> input);
 
 
 constexpr int kMaxUvSets = 4;

@@ -520,14 +520,92 @@ inline void ReconstructNormalMap(std::span<RGBu8> output, std::span<const Pixel>
         convertPixel(i);
 }
 
-void ReconstructNormalMapRG8(std::span<RGBu8> output, std::span<const RGu8> input)
+void ReconstructNormalMapRGu8(std::span<RGBu8> output, std::span<const RGu8> input)
 {
     ReconstructNormalMap<RGu8, 0, 1>(output, input);
 }
 
-void ReconstructNormalMapGA8(std::span<RGBu8> output, std::span<const RGBAu8> input)
+void ReconstructNormalMapGAu8(std::span<RGBu8> output, std::span<const RGBAu8> input)
 {
     ReconstructNormalMap<RGBAu8, 1, 3>(output, input);
+}
+
+template<class Pixel, size_t XOffset, size_t YOffset>
+inline void ReconstructNormalMapHalf(std::span<RGBf16> output, std::span<const Pixel> input)
+{
+    static_assert(std::is_trivially_copyable_v<GfHalf>);
+    if (output.size() < input.size()) {
+        TF_RUNTIME_ERROR("Normal map output must hold at least as many pixels as the input");
+        return;
+    }
+
+    const auto source = std::as_bytes(input);
+    const auto destination = std::as_writable_bytes(output);
+    const auto read = [&](size_t i, size_t offset) {
+        GfHalf value;
+        std::memcpy(&value, source.data() + i * sizeof(Pixel) + offset * sizeof(GfHalf), sizeof(value));
+        return value;
+    };
+    const auto store = [&](size_t i, GfHalf x, GfHalf y, GfHalf z) {
+        const RGBf16 pixel{x, y, z};
+        std::memcpy(destination.data() + i * sizeof(RGBf16), &pixel, sizeof(pixel));
+    };
+    const auto convertPixel = [&](size_t i) {
+        const GfHalf x = read(i, XOffset), y = read(i, YOffset);
+        const float sx = 2.0f * static_cast<float>(x) - 1.0f;
+        const float sy = 2.0f * static_cast<float>(y) - 1.0f;
+        const float squaredZ = std::max(0.0f, 1.0f - sx * sx - sy * sy);
+        store(i, x, y, GfHalf((std::sqrt(squaredZ) + 1.0f) * 0.5f));
+    };
+    const auto convertBlock = [&](size_t i) {
+        GfHalf x[8], y[8];
+        alignas(32) float xf[8], yf[8], zf[8];
+        for (size_t lane = 0; lane < 8; ++lane) {
+            x[lane] = read(i + lane, XOffset);
+            y[lane] = read(i + lane, YOffset);
+            xf[lane] = static_cast<float>(x[lane]);
+            yf[lane] = static_cast<float>(y[lane]);
+        }
+        const __m256 one = _mm256_set1_ps(1.0f);
+        const __m256 two = _mm256_set1_ps(2.0f);
+        const __m256 sx = _mm256_sub_ps(_mm256_mul_ps(_mm256_load_ps(xf), two), one);
+        const __m256 sy = _mm256_sub_ps(_mm256_mul_ps(_mm256_load_ps(yf), two), one);
+        const __m256 squaredZ = _mm256_sub_ps(_mm256_sub_ps(one, _mm256_mul_ps(sx, sx)), _mm256_mul_ps(sy, sy));
+        const __m256 z = _mm256_mul_ps(_mm256_add_ps(_mm256_sqrt_ps(_mm256_max_ps(squaredZ, _mm256_setzero_ps())), one),
+                                       _mm256_set1_ps(0.5f));
+        _mm256_store_ps(zf, z);
+        for (size_t lane = 0; lane < 8; ++lane)
+            store(i + lane, x[lane], y[lane], GfHalf(zf[lane]));
+    };
+
+    const size_t count = input.size();
+    if constexpr (sizeof(Pixel) < sizeof(RGBf16)) {
+        if (destination.data() == source.data()) {
+            size_t i = count;
+            for (; i >= 8; i -= 8)
+                convertBlock(i - 8);
+            _mm256_zeroupper();
+            while (i != 0)
+                convertPixel(--i);
+            return;
+        }
+    }
+    size_t i = 0;
+    for (; count - i >= 8; i += 8)
+        convertBlock(i);
+    _mm256_zeroupper();
+    for (; i < count; ++i)
+        convertPixel(i);
+}
+
+void ReconstructNormalMapRGf16(std::span<RGBf16> output, std::span<const RGf16> input)
+{
+    ReconstructNormalMapHalf<RGf16, 0, 1>(output, input);
+}
+
+void ReconstructNormalMapGAf16(std::span<RGBf16> output, std::span<const RGBAf16> input)
+{
+    ReconstructNormalMapHalf<RGBAf16, 1, 3>(output, input);
 }
 
 
