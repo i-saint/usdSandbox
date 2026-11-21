@@ -90,6 +90,75 @@ static bool TestTransforms()
     return true;
 }
 
+static bool TestTangents()
+{
+    constexpr size_t triangleCount = 10;
+    std::vector<GfVec3f> vertices;
+    std::vector<GfVec2f> uvs;
+    std::vector<GfVec3f> normals;
+    std::vector<int> indices;
+    vertices.emplace_back(0.0f, 0.0f, 0.0f);
+    uvs.emplace_back(0.0f, 0.0f);
+    normals.emplace_back(0.0f, 0.0f, 1.0f);
+    constexpr float tau = 6.28318530718f;
+    for (size_t i = 0; i < triangleCount; ++i) {
+        const float angle = tau * static_cast<float>(i) / static_cast<float>(triangleCount);
+        const float x = std::cos(angle), y = std::sin(angle);
+        vertices.emplace_back(x, y, 0.0f);
+        uvs.emplace_back(x, y);
+        normals.emplace_back(0.0f, 0.0f, 1.0f);
+    }
+    for (size_t triangle = 0; triangle < triangleCount; ++triangle) {
+        indices.insert(indices.end(), {0, static_cast<int>(triangle + 1),
+            static_cast<int>((triangle + 1) % triangleCount + 1)});
+    }
+    vertices.emplace_back(100.0f, 100.0f, 0.0f);
+    uvs.emplace_back(0.0f, 0.0f);
+    normals.emplace_back(0.0f, 0.0f, 1.0f);
+
+    std::vector<GfVec4f> tangents4(vertices.size());
+    std::vector<GfVec3f> tangents3(vertices.size());
+    GenerateTangentsTriangleIndexed(tangents4, vertices, uvs, normals, indices);
+    GenerateTangentsTriangleIndexed(tangents3, vertices, uvs, normals, indices);
+    for (size_t i = 0; i <= triangleCount; ++i) {
+        if (std::abs(tangents4[i][0] - 1.0f) > 1e-5f || std::abs(tangents4[i][1]) > 1e-5f ||
+            std::abs(tangents4[i][2]) > 1e-5f || tangents4[i][3] != 1.0f ||
+            tangents3[i] != GfVec3f(tangents4[i][0], tangents4[i][1], tangents4[i][2])) {
+            std::cerr << "Indexed tangent mismatch at vertex " << i << "\n";
+            return false;
+        }
+    }
+    if (std::abs(tangents4.back()[0] - 1.0f) > 1e-5f || tangents4.back()[3] != 1.0f) {
+        std::cerr << "Unused vertex tangent fallback mismatch\n";
+        return false;
+    }
+
+    std::vector<GfVec3f> triangleVertices = {GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)};
+    std::vector<GfVec3f> triangleNormals(3, GfVec3f(0, 0, 1));
+    const int triangleIndices[] = {0, 1, 2};
+    std::vector<GfVec2f> mirroredUvs = {GfVec2f(0, 0), GfVec2f(1, 0), GfVec2f(0, -1)};
+    GfVec4f mirrored[3];
+    GenerateTangentsTriangleIndexed(mirrored, triangleVertices, mirroredUvs, triangleNormals, triangleIndices);
+    for (const GfVec4f& tangent : mirrored) {
+        if (std::abs(tangent[0] - 1.0f) > 1e-5f || tangent[3] != -1.0f) {
+            std::cerr << "Mirrored-UV tangent handedness mismatch\n";
+            return false;
+        }
+    }
+
+    std::vector<GfVec2f> degenerateUvs(3, GfVec2f(0.0f));
+    GfVec4f fallback[3];
+    GenerateTangentsTriangleIndexed(fallback, triangleVertices, degenerateUvs, triangleNormals, triangleIndices);
+    for (const GfVec4f& tangent : fallback) {
+        if (std::abs(tangent[0] - 1.0f) > 1e-5f || std::abs(tangent[1]) > 1e-5f ||
+            std::abs(tangent[2]) > 1e-5f || tangent[3] != 1.0f) {
+            std::cerr << "Degenerate-UV tangent fallback mismatch\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool TestPageBoundary()
 {
     SYSTEM_INFO info;
@@ -122,7 +191,7 @@ static bool TestPageBoundary()
 
 int main()
 {
-    if (!TestTransforms() || !Verify({}) || !TestPageBoundary()) return 1;
+    if (!TestTransforms() || !TestTangents() || !Verify({}) || !TestPageBoundary()) return 1;
     std::mt19937 random(0x4132);
     std::uniform_real_distribution<float> distribution(-10000.0f, 10000.0f);
     std::vector<GfVec3f> points(1024 * 1024);
@@ -165,7 +234,7 @@ int main()
     };
     const double referenceMs = benchmark(ReferenceBounds);
     const double fastMs = benchmark(FastBounds);
-    std::cout << "FastBounds and FastTransform tests passed\nReference: " << referenceMs
+    std::cout << "FastBounds, FastTransform, and tangent tests passed\nReference: " << referenceMs
               << " ms, FastBounds: " << fastMs << " ms\n";
     return 0;
 }

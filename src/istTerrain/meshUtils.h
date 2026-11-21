@@ -16,6 +16,15 @@ void FastTransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> inp
 // Matches GfMatrix4f::TransformDir: no translation or homogeneous projection.
 void FastTransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
 
+// Requires AVX2. output.size() defines the vertex count; the attribute spans must cover it.
+// indices is a triangle list with three vertex indices per triangle.
+void GenerateTangentsTriangleIndexed(std::span<GfVec4f> output,
+    std::span<const GfVec3f> vertices, std::span<const GfVec2f> uvs,
+    std::span<const GfVec3f> normals, std::span<const int> indices);
+void GenerateTangentsTriangleIndexed(std::span<GfVec3f> output,
+    std::span<const GfVec3f> vertices, std::span<const GfVec2f> uvs,
+    std::span<const GfVec3f> normals, std::span<const int> indices);
+
 constexpr int kMaxUvSets = 4;
 
 template<typename T>

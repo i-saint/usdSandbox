@@ -2,7 +2,9 @@
 #include "meshUtils.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <immintrin.h>
@@ -147,6 +149,227 @@ void FastTransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> inp
 void FastTransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
 {
     FastTransform<false>(output, input, transform);
+}
+
+
+inline float Dot(const GfVec3f& a, const GfVec3f& b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+inline GfVec3f NormalizeOrZero(const GfVec3f& value)
+{
+    const float length = std::sqrt(Dot(value, value));
+    return length > 0.0f && std::isfinite(length) ? value / length : GfVec3f(0.0f);
+}
+
+inline float AngleBetween(const GfVec3f& a, const GfVec3f& b)
+{
+    return std::atan2(std::sqrt(Dot(GfCross(a, b), GfCross(a, b))), Dot(a, b));
+}
+
+inline void ComputeTriangleTangents(const GfVec3f (&vertices)[3], const GfVec2f (&uvs)[3],
+    GfVec3f (&tangents)[3], GfVec3f (&binormals)[3])
+{
+    const GfVec3f edge1 = vertices[1] - vertices[0];
+    const GfVec3f edge2 = vertices[2] - vertices[0];
+    const float du1 = uvs[1][0] - uvs[0][0];
+    const float du2 = uvs[2][0] - uvs[0][0];
+    const float dv1 = uvs[1][1] - uvs[0][1];
+    const float dv2 = uvs[2][1] - uvs[0][1];
+    const float determinant = du1 * dv2 - du2 * dv1;
+
+    GfVec3f tangent(0.0f), binormal(0.0f);
+    if (std::abs(determinant) > 1e-8f) {
+        tangent = NormalizeOrZero(edge1 * dv2 - edge2 * dv1) * determinant;
+        binormal = NormalizeOrZero(edge2 * du1 - edge1 * du2) * determinant;
+    }
+
+    const float angles[3] = {
+        AngleBetween(vertices[2] - vertices[0], vertices[1] - vertices[0]),
+        AngleBetween(vertices[0] - vertices[1], vertices[2] - vertices[1]),
+        AngleBetween(vertices[1] - vertices[2], vertices[0] - vertices[2])
+    };
+    for (int i = 0; i < 3; ++i) {
+        tangents[i] = tangent * angles[i];
+        binormals[i] = binormal * angles[i];
+    }
+}
+
+inline GfVec4f OrthogonalizeTangent(GfVec3f tangent, GfVec3f binormal, const GfVec3f& normal)
+{
+    const float normalTangent = Dot(normal, tangent);
+    tangent -= normal * normalTangent;
+    const float tangentLength = std::sqrt(Dot(tangent, tangent));
+
+    float binormalLength = 0.0f;
+    if (tangentLength > 1e-6f && std::isfinite(tangentLength)) {
+        tangent /= tangentLength;
+        const float normalBinormal = Dot(normal, binormal);
+        const float tangentBinormal = Dot(tangent, binormal) * tangentLength;
+        binormal -= normal * normalBinormal + tangent * tangentBinormal;
+        binormalLength = std::sqrt(Dot(binormal, binormal));
+    }
+
+    if (!(tangentLength > 1e-6f) || !(binormalLength > 1e-6f) ||
+        !std::isfinite(tangentLength) || !std::isfinite(binormalLength)) {
+        const float alignment[3] = {std::abs(normal[0]), std::abs(normal[1]), std::abs(normal[2])};
+        int axes[3] = {0, 1, 2};
+        std::sort(std::begin(axes), std::end(axes), [&](int a, int b) {
+            return alignment[a] < alignment[b] || (alignment[a] == alignment[b] && a < b);
+        });
+        GfVec3f axis1(0.0f), axis2(0.0f);
+        axis1[axes[0]] = 1.0f;
+        axis2[axes[1]] = 1.0f;
+        tangent = NormalizeOrZero(axis1 - normal * Dot(normal, axis1));
+        binormal = NormalizeOrZero(axis2 - normal * Dot(normal, axis2) - tangent * Dot(tangent, axis2));
+    }
+    else {
+        binormal /= binormalLength;
+    }
+
+    const float handedness = Dot(GfCross(normal, tangent), binormal) > 0.0f ? 1.0f : -1.0f;
+    return GfVec4f(tangent[0], tangent[1], tangent[2], handedness);
+}
+
+template<class Tangent>
+inline void GenerateTangentsTriangleIndexedImpl(std::span<Tangent> output,
+    std::span<const GfVec3f> vertices, std::span<const GfVec2f> uvs,
+    std::span<const GfVec3f> normals, std::span<const int> indices)
+{
+    const size_t vertexCount = output.size();
+    if (vertices.size() < vertexCount || uvs.size() < vertexCount || normals.size() < vertexCount) {
+        TF_RUNTIME_ERROR("Tangent generation requires vertex, UV, and normal spans to cover the output span");
+        return;
+    }
+    if (indices.size() % 3 != 0) {
+        TF_RUNTIME_ERROR("Tangent generation requires triangle indices in groups of three");
+        return;
+    }
+    for (int index : indices) {
+        if (index < 0 || static_cast<size_t>(index) >= vertexCount) {
+            TF_RUNTIME_ERROR("Tangent generation received an out-of-range vertex index");
+            return;
+        }
+    }
+
+    std::vector<GfVec3f> tangentSums(vertexCount, GfVec3f(0.0f));
+    std::vector<GfVec3f> binormalSums(vertexCount, GfVec3f(0.0f));
+    size_t triangle = 0;
+    alignas(32) float positions[3][3][8];
+    alignas(32) float texcoords[3][2][8];
+    alignas(32) float angles[3][8];
+    alignas(32) float tangentContributions[3][3][8];
+    alignas(32) float binormalContributions[3][3][8];
+
+    for (; indices.size() - triangle * 3 >= 24; triangle += 8) {
+        int vertexIndices[3][8];
+        for (int lane = 0; lane < 8; ++lane) {
+            for (int corner = 0; corner < 3; ++corner) {
+                const int index = indices[(triangle + lane) * 3 + corner];
+                vertexIndices[corner][lane] = index;
+                for (int axis = 0; axis < 3; ++axis)
+                    positions[corner][axis][lane] = vertices[index][axis];
+                for (int axis = 0; axis < 2; ++axis)
+                    texcoords[corner][axis][lane] = uvs[index][axis];
+            }
+            GfVec3f triVertices[3] = {
+                vertices[vertexIndices[0][lane]], vertices[vertexIndices[1][lane]], vertices[vertexIndices[2][lane]]};
+            angles[0][lane] = AngleBetween(triVertices[2] - triVertices[0], triVertices[1] - triVertices[0]);
+            angles[1][lane] = AngleBetween(triVertices[0] - triVertices[1], triVertices[2] - triVertices[1]);
+            angles[2][lane] = AngleBetween(triVertices[1] - triVertices[2], triVertices[0] - triVertices[2]);
+        }
+
+        const __m256 x0 = _mm256_load_ps(positions[0][0]);
+        const __m256 y0 = _mm256_load_ps(positions[0][1]);
+        const __m256 z0 = _mm256_load_ps(positions[0][2]);
+        const __m256 x1 = _mm256_load_ps(positions[1][0]);
+        const __m256 y1 = _mm256_load_ps(positions[1][1]);
+        const __m256 z1 = _mm256_load_ps(positions[1][2]);
+        const __m256 x2 = _mm256_load_ps(positions[2][0]);
+        const __m256 y2 = _mm256_load_ps(positions[2][1]);
+        const __m256 z2 = _mm256_load_ps(positions[2][2]);
+        const __m256 du1 = _mm256_sub_ps(_mm256_load_ps(texcoords[1][0]), _mm256_load_ps(texcoords[0][0]));
+        const __m256 du2 = _mm256_sub_ps(_mm256_load_ps(texcoords[2][0]), _mm256_load_ps(texcoords[0][0]));
+        const __m256 dv1 = _mm256_sub_ps(_mm256_load_ps(texcoords[1][1]), _mm256_load_ps(texcoords[0][1]));
+        const __m256 dv2 = _mm256_sub_ps(_mm256_load_ps(texcoords[2][1]), _mm256_load_ps(texcoords[0][1]));
+        const __m256 determinant = _mm256_sub_ps(_mm256_mul_ps(du1, dv2), _mm256_mul_ps(du2, dv1));
+        const __m256 edge1x = _mm256_sub_ps(x1, x0), edge1y = _mm256_sub_ps(y1, y0), edge1z = _mm256_sub_ps(z1, z0);
+        const __m256 edge2x = _mm256_sub_ps(x2, x0), edge2y = _mm256_sub_ps(y2, y0), edge2z = _mm256_sub_ps(z2, z0);
+        const __m256 rawTx = _mm256_sub_ps(_mm256_mul_ps(edge1x, dv2), _mm256_mul_ps(edge2x, dv1));
+        const __m256 rawTy = _mm256_sub_ps(_mm256_mul_ps(edge1y, dv2), _mm256_mul_ps(edge2y, dv1));
+        const __m256 rawTz = _mm256_sub_ps(_mm256_mul_ps(edge1z, dv2), _mm256_mul_ps(edge2z, dv1));
+        const __m256 rawBx = _mm256_sub_ps(_mm256_mul_ps(edge2x, du1), _mm256_mul_ps(edge1x, du2));
+        const __m256 rawBy = _mm256_sub_ps(_mm256_mul_ps(edge2y, du1), _mm256_mul_ps(edge1y, du2));
+        const __m256 rawBz = _mm256_sub_ps(_mm256_mul_ps(edge2z, du1), _mm256_mul_ps(edge1z, du2));
+        const __m256 validUv = _mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.0f), determinant),
+                                              _mm256_set1_ps(1e-8f), _CMP_GT_OQ);
+        const __m256 tangentLengthSq = _mm256_add_ps(_mm256_mul_ps(rawTx, rawTx),
+            _mm256_add_ps(_mm256_mul_ps(rawTy, rawTy), _mm256_mul_ps(rawTz, rawTz)));
+        const __m256 binormalLengthSq = _mm256_add_ps(_mm256_mul_ps(rawBx, rawBx),
+            _mm256_add_ps(_mm256_mul_ps(rawBy, rawBy), _mm256_mul_ps(rawBz, rawBz)));
+        const __m256 tangentValid = _mm256_and_ps(validUv, _mm256_cmp_ps(tangentLengthSq, _mm256_setzero_ps(), _CMP_GT_OQ));
+        const __m256 binormalValid = _mm256_and_ps(validUv, _mm256_cmp_ps(binormalLengthSq, _mm256_setzero_ps(), _CMP_GT_OQ));
+        const __m256 tangentScale = _mm256_and_ps(_mm256_mul_ps(determinant,
+            _mm256_rsqrt_ps(_mm256_blendv_ps(_mm256_set1_ps(1.0f), tangentLengthSq, tangentValid))), tangentValid);
+        const __m256 binormalScale = _mm256_and_ps(_mm256_mul_ps(determinant,
+            _mm256_rsqrt_ps(_mm256_blendv_ps(_mm256_set1_ps(1.0f), binormalLengthSq, binormalValid))), binormalValid);
+        const __m256 tangent[3] = {_mm256_mul_ps(rawTx, tangentScale), _mm256_mul_ps(rawTy, tangentScale), _mm256_mul_ps(rawTz, tangentScale)};
+        const __m256 binormal[3] = {_mm256_mul_ps(rawBx, binormalScale), _mm256_mul_ps(rawBy, binormalScale), _mm256_mul_ps(rawBz, binormalScale)};
+        for (int corner = 0; corner < 3; ++corner) {
+            const __m256 angle = _mm256_load_ps(angles[corner]);
+            for (int axis = 0; axis < 3; ++axis) {
+                _mm256_store_ps(tangentContributions[corner][axis], _mm256_mul_ps(tangent[axis], angle));
+                _mm256_store_ps(binormalContributions[corner][axis], _mm256_mul_ps(binormal[axis], angle));
+            }
+        }
+        _mm256_zeroupper();
+
+        for (int lane = 0; lane < 8; ++lane) {
+            for (int corner = 0; corner < 3; ++corner) {
+                const int index = vertexIndices[corner][lane];
+                tangentSums[index] += GfVec3f(tangentContributions[corner][0][lane],
+                    tangentContributions[corner][1][lane], tangentContributions[corner][2][lane]);
+                binormalSums[index] += GfVec3f(binormalContributions[corner][0][lane],
+                    binormalContributions[corner][1][lane], binormalContributions[corner][2][lane]);
+            }
+        }
+    }
+
+    for (; triangle < indices.size() / 3; ++triangle) {
+        const size_t offset = triangle * 3;
+        const int i0 = indices[offset], i1 = indices[offset + 1], i2 = indices[offset + 2];
+        const GfVec3f triVertices[3] = {vertices[i0], vertices[i1], vertices[i2]};
+        const GfVec2f triUvs[3] = {uvs[i0], uvs[i1], uvs[i2]};
+        GfVec3f triangleTangents[3], triangleBinormals[3];
+        ComputeTriangleTangents(triVertices, triUvs, triangleTangents, triangleBinormals);
+        for (int corner = 0; corner < 3; ++corner) {
+            tangentSums[indices[offset + corner]] += triangleTangents[corner];
+            binormalSums[indices[offset + corner]] += triangleBinormals[corner];
+        }
+    }
+
+    for (size_t i = 0; i < vertexCount; ++i) {
+        const GfVec4f tangent = OrthogonalizeTangent(tangentSums[i], binormalSums[i], normals[i]);
+        if constexpr (std::is_same_v<Tangent, GfVec4f>)
+            output[i] = tangent;
+        else
+            output[i] = GfVec3f(tangent[0], tangent[1], tangent[2]);
+    }
+}
+
+void GenerateTangentsTriangleIndexed(std::span<GfVec4f> output,
+    std::span<const GfVec3f> vertices, std::span<const GfVec2f> uvs,
+    std::span<const GfVec3f> normals, std::span<const int> indices)
+{
+    GenerateTangentsTriangleIndexedImpl(output, vertices, uvs, normals, indices);
+}
+
+void GenerateTangentsTriangleIndexed(std::span<GfVec3f> output,
+    std::span<const GfVec3f> vertices, std::span<const GfVec2f> uvs,
+    std::span<const GfVec3f> normals, std::span<const int> indices)
+{
+    GenerateTangentsTriangleIndexedImpl(output, vertices, uvs, normals, indices);
 }
 
 
