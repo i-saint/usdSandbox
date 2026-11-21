@@ -55,21 +55,124 @@ static bool VerifyTransforms(std::span<GfVec3f> points, const GfMatrix4f& transf
 
     for (bool isPoint : {true, false}) {
         if (isPoint)
-            FastTransformPoints(output, original, transform);
+            TransformPoints(output, original, transform);
         else
-            FastTransformVectors(output, original, transform);
+            TransformVectors(output, original, transform);
         if (!verify(original, output, isPoint, "separate buffers")) return false;
 
         std::copy(original.begin(), original.end(), points.begin());
         const std::span<const GfVec3f> input(points.data(), points.size());
         if (isPoint)
-            FastTransformPoints(points, input, transform);
+            TransformPoints(points, input, transform);
         else
-            FastTransformVectors(points, input, transform);
+            TransformVectors(points, input, transform);
         if (!verify(original, points, isPoint, "aliased buffers")) return false;
     }
     std::copy(original.begin(), original.end(), points.begin());
     return true;
+}
+
+static bool TestNormalizeVectors()
+{
+    std::vector<GfVec3f> original = {
+        GfVec3f(0.0f), GfVec3f(1e-8f, -2e-8f, 3e-8f), GfVec3f(1.0f, 2.0f, 3.0f),
+        GfVec3f(-4.0f, 5.0f, -6.0f), GfVec3f(7.0f, 0.0f, 0.0f), GfVec3f(0.0f, -8.0f, 0.0f),
+        GfVec3f(0.0f, 0.0f, 9.0f), GfVec3f(-1.0f, -2.0f, -3.0f), GfVec3f(12.0f, 5.0f, 0.0f),
+        GfVec3f(0.25f, -0.5f, 1.0f), GfVec3f(3.0f, 4.0f, 12.0f)
+    };
+    std::vector<GfVec3f> output(original.size());
+    for (size_t count = 0; count <= original.size(); ++count) {
+        NormalizeVectors(std::span<GfVec3f>(output.data(), count), std::span<const GfVec3f>(original.data(), count));
+        for (size_t i = 0; i < count; ++i) {
+            const GfVec3f expected = original[i].GetNormalized();
+            for (size_t axis = 0; axis < 3; ++axis) {
+                if (std::abs(output[i][axis] - expected[axis]) > 1e-6f) {
+                    std::cerr << "Normalize mismatch at vertex " << i << ", axis " << axis << "\n";
+                    return false;
+                }
+            }
+        }
+    }
+
+    std::vector<GfVec3f> inPlace = original;
+    NormalizeVectors(inPlace, std::span<const GfVec3f>(inPlace.data(), inPlace.size()));
+    for (size_t i = 0; i < inPlace.size(); ++i) {
+        const GfVec3f expected = original[i].GetNormalized();
+        for (size_t axis = 0; axis < 3; ++axis) {
+            if (std::abs(inPlace[i][axis] - expected[axis]) > 1e-6f) {
+                std::cerr << "In-place normalize mismatch at vertex " << i << ", axis " << axis << "\n";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template<class T, int Components>
+static float LerpComponent(const T& value, size_t component)
+{
+    if constexpr (std::is_same_v<T, float>)
+        return value;
+    else
+        return value[component];
+}
+
+template<class T, int Components>
+static bool TestLerpType()
+{
+    constexpr size_t testSize = 19;
+    constexpr float weight = 0.37f;
+    std::vector<T> a(testSize), b(testSize), output(testSize);
+    for (size_t i = 0; i < testSize; ++i) {
+        for (int component = 0; component < Components; ++component) {
+            const float av = static_cast<float>(i * 3 + component) - 12.0f;
+            const float bv = 20.0f - static_cast<float>(i * 2 + component * 4);
+            if constexpr (std::is_same_v<T, float>) {
+                a[i] = av;
+                b[i] = bv;
+            }
+            else {
+                a[i][component] = av;
+                b[i][component] = bv;
+            }
+        }
+    }
+
+    const auto verify = [&](std::span<const T> srcA, std::span<const T> srcB,
+                            std::span<const T> actual, const char* mode) {
+        for (size_t i = 0; i < actual.size(); ++i) {
+            for (int component = 0; component < Components; ++component) {
+                const float expected = LerpComponent<T, Components>(srcA[i], component) * (1.0f - weight) +
+                    LerpComponent<T, Components>(srcB[i], component) * weight;
+                if (std::abs(LerpComponent<T, Components>(actual[i], component) - expected) > 1e-5f) {
+                    std::cerr << "Lerp mismatch (" << mode << ") at item " << i << ", component " << component << "\n";
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    for (size_t count = 0; count <= testSize; ++count) {
+        const std::span<const T> srcA(a.data(), count), srcB(b.data(), count);
+        std::span<T> dst(output.data(), count);
+        Lerp(dst, srcA, srcB, weight);
+        if (!verify(srcA, srcB, dst, "separate buffers")) return false;
+
+        std::vector<T> aliasA(a.begin(), a.begin() + count);
+        Lerp(std::span<T>(aliasA), std::span<const T>(aliasA), srcB, weight);
+        if (!verify(srcA, srcB, aliasA, "first input alias")) return false;
+
+        std::vector<T> aliasB(b.begin(), b.begin() + count);
+        Lerp(std::span<T>(aliasB), srcA, std::span<const T>(aliasB), weight);
+        if (!verify(srcA, srcB, aliasB, "second input alias")) return false;
+    }
+    return true;
+}
+
+static bool TestLerp()
+{
+    return TestLerpType<float, 1>() && TestLerpType<GfVec2f, 2>() && TestLerpType<GfVec3f, 3>();
 }
 
 static bool TestTransforms()
@@ -191,7 +294,7 @@ static bool TestPageBoundary()
 
 int main()
 {
-    if (!TestTransforms() || !TestTangents() || !Verify({}) || !TestPageBoundary()) return 1;
+    if (!TestNormalizeVectors() || !TestLerp() || !TestTransforms() || !TestTangents() || !Verify({}) || !TestPageBoundary()) return 1;
     std::mt19937 random(0x4132);
     std::uniform_real_distribution<float> distribution(-10000.0f, 10000.0f);
     std::vector<GfVec3f> points(1024 * 1024);

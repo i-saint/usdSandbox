@@ -68,19 +68,96 @@ inline __m256 PermutePacked(__m256 a, __m256 b, __m256 c)
 {
     const __m256i indices = _mm256_setr_epi32((Lanes % 8)...);
     constexpr auto mask = [](int source) {
-        constexpr int lanes[] = {Lanes...};
+        constexpr int lanes[] = { Lanes... };
         int result = 0;
         for (int i = 0; i < 8; ++i)
             if (lanes[i] / 8 == source) result |= 1 << i;
         return result;
-    };
+        };
     constexpr int fromB = mask(1);
     constexpr int fromC = mask(2);
     return _mm256_blend_ps(
         _mm256_blend_ps(_mm256_permutevar8x32_ps(a, indices),
-                        _mm256_permutevar8x32_ps(b, indices), fromB),
+            _mm256_permutevar8x32_ps(b, indices), fromB),
         _mm256_permutevar8x32_ps(c, indices), fromC);
 }
+
+void NormalizeVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input)
+{
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float));
+    size_t i = 0;
+    if (input.size() >= 8) {
+        const __m256 epsilon = _mm256_set1_ps(GF_MIN_VECTOR_LENGTH);
+        for (; input.size() - i >= 8; i += 8) {
+            __m256 packed[3];
+            std::memcpy(packed, input.data() + i, sizeof(packed));
+            const __m256 x = PermutePacked<0, 3, 6, 9, 12, 15, 18, 21>(packed[0], packed[1], packed[2]);
+            const __m256 y = PermutePacked<1, 4, 7, 10, 13, 16, 19, 22>(packed[0], packed[1], packed[2]);
+            const __m256 z = PermutePacked<2, 5, 8, 11, 14, 17, 20, 23>(packed[0], packed[1], packed[2]);
+            const __m256 lengthSquared = _mm256_add_ps(_mm256_mul_ps(x, x),
+                _mm256_add_ps(_mm256_mul_ps(y, y), _mm256_mul_ps(z, z)));
+            const __m256 length = _mm256_sqrt_ps(lengthSquared);
+            const __m256 divisor = _mm256_max_ps(length, epsilon);
+            const __m256 nx = _mm256_div_ps(x, divisor);
+            const __m256 ny = _mm256_div_ps(y, divisor);
+            const __m256 nz = _mm256_div_ps(z, divisor);
+            packed[0] = PermutePacked<0, 8, 16, 1, 9, 17, 2, 10>(nx, ny, nz);
+            packed[1] = PermutePacked<18, 3, 11, 19, 4, 12, 20, 5>(nx, ny, nz);
+            packed[2] = PermutePacked<13, 21, 6, 14, 22, 7, 15, 23>(nx, ny, nz);
+            std::memcpy(output.data() + i, packed, sizeof(packed));
+        }
+        _mm256_zeroupper();
+    }
+
+    for (; i < input.size(); ++i)
+        output[i] = input[i].GetNormalized();
+}
+
+
+template<class T, int Components>
+inline void FastLerp(std::span<T> output, std::span<const T> a, std::span<const T> b, float t)
+{
+    static_assert(sizeof(T) == Components * sizeof(float));
+    static_assert(std::is_trivially_copyable_v<T>);
+    if (a.size() != b.size() || output.size() < a.size()) {
+        TF_RUNTIME_ERROR("Lerp requires equal input sizes and an output span at least as large as the inputs");
+        return;
+    }
+    const __m256 weightB = _mm256_set1_ps(t);
+    const __m256 weightA = _mm256_set1_ps(1.0f - t);
+    size_t i = 0;
+    for (; a.size() - i >= 8; i += 8) {
+        __m256 av[Components];
+        __m256 bv[Components];
+        __m256 result[Components];
+        std::memcpy(av, a.data() + i, sizeof(av));
+        std::memcpy(bv, b.data() + i, sizeof(bv));
+        for (int component = 0; component < Components; ++component)
+            result[component] = _mm256_add_ps(_mm256_mul_ps(av[component], weightA),
+                _mm256_mul_ps(bv[component], weightB));
+        std::memcpy(output.data() + i, result, sizeof(result));
+    }
+    _mm256_zeroupper();
+
+    for (; i < a.size(); ++i)
+        output[i] = a[i] * (1.0f - t) + b[i] * t;
+}
+
+void Lerp(std::span<float> output, std::span<const float> a, std::span<const float> b, float t)
+{
+    FastLerp<float, 1>(output, a, b, t);
+}
+
+void Lerp(std::span<GfVec2f> output, std::span<const GfVec2f> a, std::span<const GfVec2f> b, float t)
+{
+    FastLerp<GfVec2f, 2>(output, a, b, t);
+}
+
+void Lerp(std::span<GfVec3f> output, std::span<const GfVec3f> a, std::span<const GfVec3f> b, float t)
+{
+    FastLerp<GfVec3f, 3>(output, a, b, t);
+}
+
 
 template<bool IsPoint>
 inline void FastTransform(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
@@ -141,12 +218,12 @@ inline void FastTransform(std::span<GfVec3f> output, std::span<const GfVec3f> in
     }
 }
 
-void FastTransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
+void TransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
 {
     FastTransform<true>(output, input, transform);
 }
 
-void FastTransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
+void TransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform)
 {
     FastTransform<false>(output, input, transform);
 }

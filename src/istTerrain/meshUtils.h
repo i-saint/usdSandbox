@@ -10,11 +10,19 @@
 // Requires AVX2. Empty input returns an empty range; NaN components are ignored.
 GfRange3f FastBounds(std::span<const GfVec3f> points);
 
+// Requires AVX2. Output must hold at least input.size() elements; exact input/output aliasing is supported.
+void NormalizeVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input);
+
+// Requires AVX2. Inputs must have equal sizes and output must hold them; exact aliasing with either input is supported.
+void Lerp(std::span<float> output, std::span<const float> a, std::span<const float> b, float t);
+void Lerp(std::span<GfVec2f> output, std::span<const GfVec2f> a, std::span<const GfVec2f> b, float t);
+void Lerp(std::span<GfVec3f> output, std::span<const GfVec3f> a, std::span<const GfVec3f> b, float t);
+
 // Both require AVX2. Output must hold at least input.size() elements; exact input/output aliasing is supported.
 // Matches GfMatrix4f::Transform, including homogeneous projection (no division for w == 0).
-void FastTransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
+void TransformPoints(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
 // Matches GfMatrix4f::TransformDir: no translation or homogeneous projection.
-void FastTransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
+void TransformVectors(std::span<GfVec3f> output, std::span<const GfVec3f> input, const GfMatrix4f& transform);
 
 // Requires AVX2. output.size() defines the vertex count; the attribute spans must cover it.
 // indices is a triangle list with three vertex indices per triangle.
